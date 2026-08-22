@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import Field, SecretStr, field_serializer, field_validator
@@ -10,6 +11,17 @@ def _split_csv(values: Any) -> list[str]:
     if values is None:
         return []
     if isinstance(values, str):
+        text = values.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            else:
+                if isinstance(parsed, list):
+                    return [str(value).strip() for value in parsed if str(value).strip()]
         return [value.strip() for value in values.split(",") if value.strip()]
     if isinstance(values, list):
         return [str(value).strip() for value in values if str(value).strip()]
@@ -44,8 +56,8 @@ class Settings(BaseSettings):
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, ge=1)
     log_level: str = "INFO"
 
-    mcp_allowed_hosts: list[str] = Field(default_factory=list)
-    mcp_allowed_origins: list[str] = Field(default_factory=list)
+    mcp_allowed_hosts: list[str] | str = Field(default_factory=list)
+    mcp_allowed_origins: list[str] | str = Field(default_factory=list)
 
     @field_serializer("imap_password")
     def _redact_secret(self, _value: str, _info: Any) -> str:
@@ -76,5 +88,5 @@ def get_settings() -> Settings:
             "http://localhost",
         ]
     if not settings.cursor_signing_key:
-        settings.cursor_signing_key = "mocu-imap-mcp-dev-cursor-key-change-me"
+        raise ValueError("CURSOR_SIGNING_KEY muss gesetzt und sicher geheim gehalten werden.")
     return settings

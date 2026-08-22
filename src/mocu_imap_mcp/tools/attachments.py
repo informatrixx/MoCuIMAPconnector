@@ -12,6 +12,42 @@ from ..imap_client import ImapClient
 from ..security import PROMPT_INJECTION_WARNING
 
 
+def _resource_mime_from_content_type(content_type: str) -> str:
+    normalized = (content_type or "").lower().strip()
+    if normalized == "application/pdf":
+        return "application/pdf"
+    if normalized in {"image/jpeg", "image/jpg"}:
+        return "image/jpeg"
+    if normalized == "image/png":
+        return "image/png"
+    if normalized == "image/gif":
+        return "image/gif"
+    if normalized == "image/webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _resource_prefix(content_type: str) -> str:
+    mime = _resource_mime_from_content_type(content_type)
+    if mime == "application/pdf":
+        return "pdf"
+    if mime == "image/jpeg":
+        return "jpeg"
+    if mime == "image/png":
+        return "png"
+    if mime == "image/gif":
+        return "gif"
+    if mime == "image/webp":
+        return "webp"
+    return "octet"
+
+
+def _read_attachment(mailbox_token: str, uid: int, part_id: str, settings: Settings) -> bytes:
+    mailbox = urllib.parse.unquote(mailbox_token)
+    with ImapClient(settings) as client:
+        return client.read_attachment(mailbox, uid, part_id)
+
+
 def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
     logger = logging.getLogger("mocu_imap_mcp.tools")
 
@@ -88,7 +124,8 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
             part_id,
         )
         mailbox_token = urllib.parse.quote(mailbox, safe="")
-        uri = f"mocu://attachment/{mailbox_token}/{uid}/{part_id}"
+        resource = _resource_prefix(attachment.content_type)
+        uri = f"mocu://attachment-{resource}/{mailbox_token}/{uid}/{part_id}"
         return {
             "uri": uri,
             "filename": attachment.filename,
@@ -97,12 +134,55 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
         }
 
     @server.resource(
-        "mocu://attachment/{mailbox_token}/{uid}/{part_id}",
+        "mocu://attachment-pdf/{mailbox_token}/{uid}/{part_id}",
         name="imap-attachment",
-        description="Binärer Zugriff auf einen IMAP-Anhang",
-        mime_type="application/octet-stream",
+        description="Binärer Zugriff auf einen PDF-Anhang.",
+        mime_type="application/pdf",
     )
     def read_attachment_resource(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        mailbox = urllib.parse.unquote(mailbox_token)
-        with ImapClient(settings) as client:
-            return client.read_attachment(mailbox, uid, part_id)
+        return _read_attachment(mailbox_token, uid, part_id, settings)
+
+    @server.resource(
+        "mocu://attachment-jpeg/{mailbox_token}/{uid}/{part_id}",
+        name="imap-attachment",
+        description="Binärer Zugriff auf einen JPEG-Anhang.",
+        mime_type="image/jpeg",
+    )
+    def read_attachment_resource_jpeg(mailbox_token: str, uid: int, part_id: str) -> bytes:
+        return _read_attachment(mailbox_token, uid, part_id, settings)
+
+    @server.resource(
+        "mocu://attachment-png/{mailbox_token}/{uid}/{part_id}",
+        name="imap-attachment",
+        description="Binärer Zugriff auf einen PNG-Anhang.",
+        mime_type="image/png",
+    )
+    def read_attachment_resource_png(mailbox_token: str, uid: int, part_id: str) -> bytes:
+        return _read_attachment(mailbox_token, uid, part_id, settings)
+
+    @server.resource(
+        "mocu://attachment-gif/{mailbox_token}/{uid}/{part_id}",
+        name="imap-attachment",
+        description="Binärer Zugriff auf einen GIF-Anhang.",
+        mime_type="image/gif",
+    )
+    def read_attachment_resource_gif(mailbox_token: str, uid: int, part_id: str) -> bytes:
+        return _read_attachment(mailbox_token, uid, part_id, settings)
+
+    @server.resource(
+        "mocu://attachment-webp/{mailbox_token}/{uid}/{part_id}",
+        name="imap-attachment",
+        description="Binärer Zugriff auf einen WebP-Anhang.",
+        mime_type="image/webp",
+    )
+    def read_attachment_resource_webp(mailbox_token: str, uid: int, part_id: str) -> bytes:
+        return _read_attachment(mailbox_token, uid, part_id, settings)
+
+    @server.resource(
+        "mocu://attachment-octet/{mailbox_token}/{uid}/{part_id}",
+        name="imap-attachment",
+        description="Binärer Zugriff auf einen Anhang.",
+        mime_type="application/octet-stream",
+    )
+    def read_attachment_resource_octet(mailbox_token: str, uid: int, part_id: str) -> bytes:
+        return _read_attachment(mailbox_token, uid, part_id, settings)

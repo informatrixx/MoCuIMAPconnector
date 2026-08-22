@@ -81,6 +81,6 @@ def test_uid_search_passes_charset_for_utf8_query() -> None:
     client.search_uids("INBOX", ["FROM", _quote_imap_string("Rechnung März")], limit=5)
     command, args = fake.uid_calls[-1]
     assert command == "SEARCH"
-    assert args[0] == "CHARSET"
-    assert args[1] == "UTF-8"
-    assert args[2] == "FROM"
+    assert args[0] == b"CHARSET"
+    assert args[1] == b"UTF-8"
+    assert args[2] == b"FROM"

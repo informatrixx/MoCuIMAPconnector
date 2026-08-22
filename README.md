@@ -41,6 +41,8 @@ MCP_BIND=127.0.0.1
 MCP_PORT=8765
 MCP_HTTP_PATH=/mcp
 CURSOR_SIGNING_KEY=
+MCP_ALLOWED_HOSTS=["127.0.0.1", "127.0.0.1:*"]
+MCP_ALLOWED_ORIGINS=["https://127.0.0.1", "https://localhost", "http://127.0.0.1", "http://localhost"]
 SEARCH_SCAN_BATCH_SIZE=100
 
 MAX_SEARCH_RESULTS=100
@@ -56,6 +58,7 @@ Hinweise:
 - Für `IMAP_PASSWORD` ausschließlich ein **anwendungsspezifisches Passwort** verwenden.
 - Passwort niemals in ChatGPT-Eingaben, Logs oder Tickets einfügen.
 - Zugriff nur mit diesem Postfach-User und App-Passwort.
+- `CURSOR_SIGNING_KEY` muss gesetzt werden (kein Standard-/Fallbackwert).
 
 ## 4) MCP-Tools
 

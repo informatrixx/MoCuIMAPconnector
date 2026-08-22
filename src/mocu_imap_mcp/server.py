@@ -13,6 +13,12 @@ from .tools.search import register_search_tools
 
 logger = logging.getLogger("mocu_imap_mcp.server")
 
+
+def _as_list(value: list[str] | str) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    return value
+
 def _configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -34,8 +40,8 @@ def run() -> None:
     settings = get_settings()
     _configure_logging(settings.log_level)
     transport_security = TransportSecuritySettings(
-        allowed_hosts=settings.mcp_allowed_hosts,
-        allowed_origins=settings.mcp_allowed_origins,
+        allowed_hosts=_as_list(settings.mcp_allowed_hosts),
+        allowed_origins=_as_list(settings.mcp_allowed_origins),
         enable_dns_rebinding_protection=True,
     )
     logger.info("MCP server start host=%s port=%s", settings.mcp_bind, settings.mcp_port)

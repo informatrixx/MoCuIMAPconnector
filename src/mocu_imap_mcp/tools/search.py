@@ -172,9 +172,12 @@ def _scan_matching_messages(
                 if entry is not None:
                     results.append(entry)
                     if len(results) >= limit:
+                        next_uid = uid - 1
+                        if next_uid < 1:
+                            return results, None
                         next_cursor = build_search_cursor(
                             mailbox,
-                            uid=max(uid - 1, 0),
+                            uid=next_uid,
                             query_hash=query_hash,
                             signing_key=signing_key,
                         )

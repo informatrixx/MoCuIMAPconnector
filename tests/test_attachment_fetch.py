@@ -8,6 +8,7 @@ from mocu_imap_mcp.config import Settings
 from mocu_imap_mcp.imap_client import ImapClient
 from mocu_imap_mcp.models import AttachmentMeta
 from mocu_imap_mcp.security import AttachmentTooLargeError
+from mocu_imap_mcp.tools.attachments import _resource_prefix
 
 
 def test_attachment_decode_base64() -> None:
@@ -37,3 +38,10 @@ def test_attachment_size_limit_prevents_fetch() -> None:
     client.list_attachments = fake_list_attachments  # type: ignore[method-assign]
     with pytest.raises(AttachmentTooLargeError):
         client.read_attachment("INBOX", 1, "2")
+
+
+def test_attachment_resource_prefix_from_mime_type() -> None:
+    assert _resource_prefix("application/pdf") == "pdf"
+    assert _resource_prefix("image/jpeg") == "jpeg"
+    assert _resource_prefix("image/png") == "png"
+    assert _resource_prefix("application/octet-stream") == "octet"

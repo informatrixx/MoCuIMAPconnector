@@ -199,7 +199,11 @@ def _is_multipart(node: list[object]) -> bool:
         return False
     if not isinstance(node[0], list):
         return False
-    return isinstance(node[-1], str)
+
+    index = 1
+    while index < len(node) and isinstance(node[index], list):
+        index += 1
+    return index < len(node) and isinstance(node[index], str)
 
 
 def _walk_multipart(node: list[object], part_id: str, attachments: list[BodyStructureAttachment]) -> None:

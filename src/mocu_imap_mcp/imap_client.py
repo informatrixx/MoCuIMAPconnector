@@ -64,6 +64,10 @@ def _to_bytes(data: bytes | str) -> bytes:
     return data if isinstance(data, bytes) else data.encode("utf-8", errors="replace")
 
 
+def _to_imap_arg(value: str | bytes) -> bytes:
+    return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
 def _decode_modified_utf7(value: str) -> str:
     """Decode IMAP modified UTF-7 mailbox names without external dependencies."""
     if "&" not in value:
@@ -361,6 +365,9 @@ def build_search_cursor(
     query_hash: str,
     signing_key: str | None = None,
 ) -> str:
+    if not (signing_key or get_settings().cursor_signing_key):
+        raise ValueError("CURSOR_SIGNING_KEY fehlt")
+
     payload = {"v": 2, "mailbox": mailbox, "q": query_hash}
     if uid is not None:
         payload["uid"] = uid
@@ -384,6 +391,9 @@ def parse_search_cursor(
     expected_mailbox: str | None = None,
     signing_key: str | None = None,
 ) -> tuple[str, int | None]:
+    if not (signing_key or get_settings().cursor_signing_key):
+        raise ValueError("CURSOR_SIGNING_KEY fehlt")
+
     if not cursor:
         raise InvalidSearchParameterError("Cursor fehlt")
 
@@ -706,7 +716,8 @@ class ImapClient:
 
         def action(client: imaplib.IMAP4 | imaplib.IMAP4_SSL) -> tuple[list[int], int | None]:
             query = _build_uid_search_query(criteria)
-            typ, data = client.uid("SEARCH", *query)
+            encoded_query = tuple(_to_imap_arg(part) for part in query)
+            typ, data = client.uid("SEARCH", *encoded_query)  # type: ignore[arg-type]
             if typ != "OK":
                 raise ImapProtocolError("IMAP SEARCH fehlgeschlagen")
             uids = _extract_uids(data or [])

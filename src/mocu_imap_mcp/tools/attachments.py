@@ -9,12 +9,11 @@ from mcp.server.mcpserver import MCPServer
 
 from ..config import Settings
 from ..imap_client import ImapClient
-from ..security import PROMPT_INJECTION_WARNING, AttachmentTooLargeError, sha256_hex
+from ..security import PROMPT_INJECTION_WARNING
 
 
 def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
     logger = logging.getLogger("mocu_imap_mcp.tools")
-    max_bytes = settings.max_attachment_size_mb * 1024 * 1024
 
     @server.tool(
         name="list_attachments",
@@ -43,12 +42,6 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
                     "size": attachment.size,
                     "sha256": None,
                 }
-                if attachment.size is None or attachment.size <= max_bytes:
-                    try:
-                        data = client.read_attachment(mailbox, uid, attachment.part_id)
-                        entry["sha256"] = sha256_hex(data)
-                    except AttachmentTooLargeError:
-                        entry["sha256"] = None
                 detail_list.append(entry)
 
         logger.info(

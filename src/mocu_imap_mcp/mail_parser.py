@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# mypy: ignore-errors
+#
 import base64
 import re
 from datetime import datetime

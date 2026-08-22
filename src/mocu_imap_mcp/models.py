@@ -59,6 +59,7 @@ class AttachmentMeta(BaseModel):
     content_type: str
     size: int | None = None
     inline: bool = False
+    transfer_encoding: str | None = None
 
 
 class InvoiceCandidate(BaseModel):

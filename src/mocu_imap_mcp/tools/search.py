@@ -42,6 +42,14 @@ def _apply_invoice_match(
     return matched
 
 
+def _match_has_attachment_flag(attachments: list[Any], has_attachment: bool | None) -> bool:
+    if has_attachment is None:
+        return True
+    if has_attachment:
+        return bool(attachments)
+    return not bool(attachments)
+
+
 def register_search_tools(server: MCPServer, settings: Settings) -> None:
     logger = logging.getLogger("mocu_imap_mcp.tools")
 
@@ -110,7 +118,7 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
                     attachments = client.list_attachments(mailbox, uid)
 
                     attachment_names = [item.filename for item in attachments if item.filename]
-                    if has_attachment is True and not attachments:
+                    if not _match_has_attachment_flag(attachments, has_attachment):
                         continue
                     if attachment_filename:
                         needle = attachment_filename.lower()

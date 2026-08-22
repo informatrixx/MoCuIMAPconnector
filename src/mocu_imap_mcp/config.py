@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Any
 
 from pydantic import Field, field_serializer, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, ge=1)
     log_level: str = "INFO"
 
-    mcp_allowed_hosts: Annotated[list[str], Field(default_factory=list)]
-    mcp_allowed_origins: Annotated[list[str], Field(default_factory=list)]
+    mcp_allowed_hosts: list[str] = Field(default_factory=list)
+    mcp_allowed_origins: list[str] = Field(default_factory=list)
 
     @field_serializer("imap_password")
     def _redact_secret(self, _value: str, _info: Any) -> str:

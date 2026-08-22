@@ -14,17 +14,17 @@ from mocu_imap_mcp.mail_parser import (
 )
 
 
-def test_decode_header_utf8_q_encoded():
+def test_decode_header_utf8_q_encoded() -> None:
     raw = "=?UTF-8?Q?Rechnung_f=C3=BCr_M=C3=A4rz?="
     assert decode_header_value(raw) == "Rechnung für März"
 
 
-def test_decode_filename_rfc2231():
+def test_decode_filename_rfc2231() -> None:
     raw = "Rechnung%20f%C3%BCr%20M%C3%A4rz%20-%202025.pdf"
     assert decode_filename(raw) == "Rechnung für März - 2025.pdf"
 
 
-def test_multipart_with_plain_html_and_pdf_attachments():
+def test_multipart_with_plain_html_and_pdf_attachments() -> None:
     msg = MIMEMultipart("mixed")
     msg["Subject"] = "Rechnung 12345"
     msg["From"] = "noreply@example.com"

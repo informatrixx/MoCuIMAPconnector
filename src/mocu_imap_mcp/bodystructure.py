@@ -110,6 +110,10 @@ def _extract_attachment(node: list[Any], part_id: str) -> AttachmentMeta | None:
     elif len(node) > 6 and isinstance(node[6], int):
         size = node[6]
 
+    transfer_encoding: str | None = None
+    if len(node) > 5 and isinstance(node[5], str):
+        transfer_encoding = node[5]
+
     disposition: str | None = None
     disposition_params: list[Any] | None = None
     if (
@@ -139,6 +143,7 @@ def _extract_attachment(node: list[Any], part_id: str) -> AttachmentMeta | None:
         content_type=f"{content_type}/{subtype}".lower(),
         size=size,
         inline=disposition == "INLINE",
+        transfer_encoding=transfer_encoding,
     )
 
 

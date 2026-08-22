@@ -17,6 +17,10 @@ class AuthenticationError(ImapConnectionError):
     """IMAP-Authentifizierung fehlgeschlagen."""
 
 
+class ImapProtocolError(ValueError):
+    """IMAP hat den Befehl mit permanentem Protokollfehler abgelehnt."""
+
+
 class MailboxNotFoundError(ValueError):
     """Mailbox wurde nicht gefunden."""
 

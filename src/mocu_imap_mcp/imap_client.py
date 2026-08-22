@@ -209,21 +209,39 @@ def _quote_imap_string(value: str) -> str:
     return '"' + value.replace("\\", r"\\").replace('"', r"\\\"") + '"'
 
 
-def build_search_cursor(mailbox: str, next_uid: int | None = None) -> str:
-    payload: dict[str, str | int] = {"mailbox": mailbox}
+def build_search_cursor(
+    mailbox: str,
+    next_uid: int | None = None,
+    query_hash: str | None = None,
+) -> str:
+    payload: dict[str, str | int] = {"v": 1, "mailbox": mailbox}
     if next_uid is not None:
         payload["uid"] = next_uid
+    if query_hash:
+        payload["q"] = query_hash
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
 
-def parse_search_cursor(cursor: str | None) -> tuple[str, int | None] | None:
+def parse_search_cursor(
+    cursor: str | None,
+    *,
+    expected_query_hash: str | None = None,
+) -> tuple[str, int | None] | None:
     if not cursor:
         return None
     try:
-        payload_raw = base64.urlsafe_b64decode(cursor.encode() + b"=").decode()
+        padded = cursor.encode() + b"=" * ((4 - len(cursor) % 4) % 4)
+        payload_raw = base64.urlsafe_b64decode(padded).decode()
         payload = json.loads(payload_raw)
+        if not isinstance(payload, dict):
+            return None
         mailbox = payload.get("mailbox")
         if not isinstance(mailbox, str):
+            return None
+        if expected_query_hash is not None and payload.get("q") != expected_query_hash:
+            return None
+        version = payload.get("v", 1)
+        if version is not None and version != 1:
             return None
         uid = payload.get("uid")
         return mailbox, int(uid) if uid is not None else None
@@ -454,7 +472,7 @@ class ImapClient:
         mailbox: str,
         criteria: list[str],
         *,
-        cursor: str | None = None,
+        cursor: str | int | None = None,
         limit: int,
     ) -> tuple[list[int], str | None]:
         if limit <= 0:
@@ -462,7 +480,9 @@ class ImapClient:
         self.ensure_mailbox(mailbox)
 
         if cursor:
-            cursor_state = parse_search_cursor(cursor)
+            cursor_state = parse_search_cursor(str(cursor) if isinstance(cursor, int) else cursor)
+            if cursor_state is None and isinstance(cursor, int):
+                cursor_state = (mailbox, cursor)
             if cursor_state is not None and cursor_state[1] is not None:
                 cursor_uid = cursor_state[1]
                 if cursor_uid > 0:

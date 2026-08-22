@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     mcp_http_path: str = "/mcp"
     max_search_results: int = Field(default=100, ge=1, le=500)
     default_search_limit: int = Field(default=50, ge=1, le=100)
+    search_scan_batch_size: int = Field(default=100, ge=1, le=1000)
     max_attachment_size_mb: int = Field(default=25, ge=1, le=500)
     mcp_max_request_body_size: int = Field(default=4 * 1024 * 1024, ge=1)
     log_level: str = "INFO"

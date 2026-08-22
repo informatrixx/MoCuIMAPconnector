@@ -21,9 +21,9 @@ class _SearchClientProtocol(Protocol):
         mailbox: str,
         criteria: list[str],
         *,
-        cursor: str | int | None = None,
+        before_uid: int | None = None,
         limit: int,
-    ) -> tuple[list[int], str | None]:
+    ) -> tuple[list[int], int | None]:
         ...
 
     def fetch_headers(
@@ -131,10 +131,13 @@ def _scan_matching_messages(
     limit: int,
     scan_batch_size: int,
     cursor: str | None,
+    signing_key: str,
     query_hash: str,
     match_builder: Callable[[str, int], dict[str, Any] | None],
 ) -> tuple[list[dict[str, Any]], str | None]:
-    cursor_state = parse_search_cursor(cursor, expected_query_hash=query_hash)
+    cursor_state = (
+        parse_search_cursor(cursor, expected_query_hash=query_hash, signing_key=signing_key) if cursor else None
+    )
     cursor_mailbox = cursor_state[0] if cursor_state else None
     cursor_uid = cursor_state[1] if cursor_state else None
 
@@ -159,7 +162,7 @@ def _scan_matching_messages(
                 mailbox,
                 criteria,
                 limit=scan_batch_size,
-                cursor=current_cursor,
+                before_uid=current_cursor,
             )
             if not uids:
                 break
@@ -169,17 +172,18 @@ def _scan_matching_messages(
                 if entry is not None:
                     results.append(entry)
                     if len(results) >= limit:
-                        next_cursor = build_search_cursor(mailbox, max(uid - 1, 0), query_hash)
+                        next_cursor = build_search_cursor(
+                            mailbox,
+                            uid=max(uid - 1, 0),
+                            query_hash=query_hash,
+                            signing_key=signing_key,
+                        )
                         return results, next_cursor
 
             if not batch_cursor:
                 break
 
-            parsed = parse_search_cursor(batch_cursor, expected_query_hash=query_hash)
-            if parsed is None:
-                break
-
-            current_cursor = parsed[1]
+            current_cursor = batch_cursor
             if current_cursor is None or current_cursor <= 0:
                 break
 
@@ -287,6 +291,7 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
                 limit=limit,
                 scan_batch_size=max(1, min(settings.search_scan_batch_size, settings.max_search_results)),
                 cursor=cursor,
+                signing_key=settings.cursor_signing_key,
                 query_hash=query_hash,
                 match_builder=_match,
             )
@@ -375,6 +380,7 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
                 limit=limit,
                 scan_batch_size=max(1, min(settings.search_scan_batch_size, settings.max_search_results)),
                 cursor=cursor,
+                signing_key=settings.cursor_signing_key,
                 query_hash=query_hash,
                 match_builder=_match,
             )

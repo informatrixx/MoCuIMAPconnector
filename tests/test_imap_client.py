@@ -3,19 +3,20 @@ from __future__ import annotations
 import pytest
 
 from mocu_imap_mcp.imap_client import (
+    InvalidSearchParameterError,
     _build_uid_search_query,
     _quote_imap_string,
+    extract_bodystructure_from_fetch,
     extract_fetch_literal,
     extract_fetch_literals,
     extract_fetch_metadata,
     parse_search_criteria,
 )
-from mocu_imap_mcp.security import InvalidSearchParameterError
 
 
-def test_quote_imap_string_with_special_characters() -> None:
-    assert _quote_imap_string('Foo "bar"') == '"Foo \\\\\\"bar\\\\\\""'
-    assert _quote_imap_string(r"foo\\bar") == '"foo\\\\\\\\bar"'
+def test_quote_imap_string() -> None:
+    assert _quote_imap_string('Foo "bar"') == '"Foo \\"bar\\""'
+    assert _quote_imap_string(r"foo\bar") == '"foo\\\\bar"'
 
 
 def test_quote_imap_string_rejects_control_chars() -> None:
@@ -35,15 +36,30 @@ def test_uid_search_query_no_charset_for_ascii() -> None:
 
 def test_extract_fetch_metadata_and_literals() -> None:
     response = [
-        (b'123 (UID 4711 BODY[HEADER] {85}', b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n"),
+        (
+            b'123 (UID 4711 BODY[HEADER] {85}',
+            b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n",
+        ),
         b')',
     ]
     metadata = extract_fetch_metadata(response)
     assert metadata
-    assert metadata[0].startswith(b'123 (UID 4711 BODY[HEADER]')
+    assert metadata[0].startswith(b"123 (UID 4711 BODY[HEADER]")
     literals = extract_fetch_literals(response)
     assert literals == [b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n"]
     assert extract_fetch_literal(response) == b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n"
+
+
+def test_extract_bodystructure_from_fetch() -> None:
+    response = [
+        b'1 (UID 4711 BODYSTRUCTURE (("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 128 4)'
+        b'("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 2048 NIL'
+        b'("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL) "MIXED") INTERNALDATE "15-Mar-2025 11:30:00 +0100")',
+    ]
+    structure = extract_bodystructure_from_fetch(response)
+    assert structure is not None
+    assert structure.startswith("((")
+    assert "invoice.pdf" in structure
 
 
 def test_search_criteria_date_range_inclusive() -> None:

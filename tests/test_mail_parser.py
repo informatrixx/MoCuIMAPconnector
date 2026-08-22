@@ -46,3 +46,20 @@ def test_multipart_with_plain_html_and_pdf_attachments() -> None:
     body, has_html = extract_body_text_and_html(message)
     assert "Hallo Team" in body
     assert has_html is False
+
+
+def test_singlepart_html_is_sanitized() -> None:
+    raw = (
+        "<html><style>.x{}</style><script>alert(1)</script>"
+        "<body><p>Rechnung <strong>123</strong></p>"
+        "<img src=\"https://tracker.example/1.gif\"></body></html>"
+    )
+    msg = MIMEText(raw, "html", "utf-8")
+    msg["Subject"] = "Rechnung"
+    msg["From"] = "billing@example.org"
+    msg["To"] = "konto@example.org"
+    parsed = message_from_bytes(msg.as_bytes(policy=policy.default))
+
+    body, has_html = extract_body_text_and_html(parsed)
+    assert body == "Rechnung 123"
+    assert has_html is True

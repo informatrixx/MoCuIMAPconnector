@@ -9,6 +9,8 @@ def test_settings_does_not_serialize_password_plain() -> None:
     assert "super-secret-123" not in repr(settings)
     assert "super-secret-123" not in settings.model_dump_json()
     assert "***redacted***" in settings.model_dump_json()
+    assert "super-secret-123" not in str(settings)
+    assert "super-secret-123" not in settings.model_dump().get("imap_password", "")
 
 
 def test_redact_function_removes_secret() -> None:

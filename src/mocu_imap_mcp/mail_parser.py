@@ -217,6 +217,9 @@ def _part_text_content(part: Message) -> str:
 def extract_body_text_and_html(message: Message) -> tuple[str, bool]:
     if not message.is_multipart():
         text = _part_text_content(message)
+        content_type = (message.get_content_type() or "").lower()
+        if content_type == "text/html":
+            return html_to_text(text), True
         return text.strip(), False
 
     plain_text: str | None = None

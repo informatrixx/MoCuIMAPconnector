@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field, field_serializer, field_validator
+from pydantic import Field, SecretStr, field_serializer, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,10 +28,11 @@ class Settings(BaseSettings):
     imap_port: int = Field(default=993, ge=1, le=65535)
     imap_ssl: bool = True
     imap_username: str = ""
-    imap_password: str = ""
+    imap_password: SecretStr = SecretStr("")
     imap_connection_timeout: int = Field(default=30, ge=1, le=120)
     imap_connection_retries: int = Field(default=3, ge=1, le=10)
     imap_retry_delay: float = Field(default=1.5, ge=0.1, le=30.0)
+    cursor_signing_key: str = Field(default="")
 
     mcp_bind: str = "127.0.0.1"
     mcp_port: int = Field(default=8765, ge=1, le=65535)
@@ -74,4 +75,6 @@ def get_settings() -> Settings:
             "http://127.0.0.1",
             "http://localhost",
         ]
+    if not settings.cursor_signing_key:
+        settings.cursor_signing_key = "mocu-imap-mcp-dev-cursor-key-change-me"
     return settings

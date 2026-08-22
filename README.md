@@ -40,6 +40,7 @@ IMAP_PASSWORD=
 MCP_BIND=127.0.0.1
 MCP_PORT=8765
 MCP_HTTP_PATH=/mcp
+CURSOR_SIGNING_KEY=
 SEARCH_SCAN_BATCH_SIZE=100
 
 MAX_SEARCH_RESULTS=100
@@ -113,7 +114,7 @@ Der Server läuft standardmäßig auf `127.0.0.1:8765/mcp`.
 . .venv/bin/activate
 pytest -q
 ruff check src tests scripts
-# optional (falls nötig): mypy src scripts tests
+mypy src
 ```
 
 Unit-Tests decken u. a. ab:
@@ -123,6 +124,10 @@ Unit-Tests decken u. a. ab:
 - Datumsbereich für IMAP (`SINCE`/`BEFORE`)
 - UID-/Cursor-Mechanik
 - Geheimnis-Redaktion in Settings/Exceptions/Logs
+
+CI-Workflow:
+
+- `.github/workflows/ci.yml` (Python 3.12/3.13, ruff, mypy, pytest)
 
 ## 8) Deployment – Variante A (bevorzugt)
 
@@ -186,6 +191,7 @@ Siehe [`deploy/mocu-imap-mcp.service`](deploy/mocu-imap-mcp.service) und Beispie
 - `MAX_ATTACHMENT_SIZE_MB`
 - `MCP_MAX_REQUEST_BODY_SIZE`
 - `LOG_LEVEL`
+- `CURSOR_SIGNING_KEY`
 - `MCP_ALLOWED_HOSTS`
 - `MCP_ALLOWED_ORIGINS`
 

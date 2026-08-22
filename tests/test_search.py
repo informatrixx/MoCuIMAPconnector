@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from mocu_imap_mcp.imap_client import (
     _format_imap_date,
     _next_day,
@@ -9,9 +11,9 @@ from mocu_imap_mcp.imap_client import (
     parse_search_criteria,
     parse_search_cursor,
 )
+from mocu_imap_mcp.security import InvalidSearchParameterError
 from mocu_imap_mcp.tools.search import (
     _build_search_hash,
-    _match_has_attachment_flag,
     _scan_matching_messages,
 )
 
@@ -24,32 +26,29 @@ class _FakeAttachment:
 
 
 class _FakeImapClient:
-    def __init__(self) -> None:
-        self.mailbox_uids: dict[str, list[int]] = {
-            "INBOX": list(range(100, 0, -1)),
-        }
+    def __init__(self, data: dict[str, list[int]]) -> None:
+        self.mailbox_uids = data
 
     def search_uids(
         self,
         mailbox: str,
         _criteria: list[str],
         *,
-        cursor: str | int | None = None,
+        before_uid: int | None = None,
         limit: int,
-    ) -> tuple[list[int], str | None]:
+    ) -> tuple[list[int], int | None]:
         uids = self.mailbox_uids.get(mailbox, [])
-        if cursor is not None:
-            max_uid = int(cursor)
-            uids = [uid for uid in uids if uid <= max_uid]
-        page = uids[:limit]
-        next_cursor = str(page[-1] - 1) if page and len(page) >= limit and page[-1] > 1 else None
-        return page, next_cursor
+        if before_uid is not None:
+            uids = [uid for uid in uids if uid <= before_uid]
+        if not uids:
+            return [], None
+        batch = uids[:limit]
+        next_uid = batch[-1] - 1 if len(uids) > limit and batch else None
+        return batch, next_uid
 
     def fetch_headers(self, _mailbox: str, uid: int, *, include_all_headers: bool = False) -> tuple[bytes, str | None]:
         payload = (
-            f"Subject: Rechnung {uid}\\r\\n\\r\\n"
-            if uid % 20 == 0
-            else f"Subject: Nachricht {uid}\\r\\n\\r\\n"
+            f"Subject: Rechnung {uid}\r\n\r\n" if uid % 20 == 0 else f"Subject: Nachricht {uid}\r\n\r\n"
         )
         return payload.encode(), "2025-01-01T00:00:00"
 
@@ -57,6 +56,7 @@ class _FakeImapClient:
         if uid % 20 == 0:
             return [_FakeAttachment(filename=f"Rechnung-{uid}.pdf")]
         return []
+
 
 def test_search_criteria_date_range_is_inclusive() -> None:
     criteria = parse_search_criteria(date_from="2025-01-01", date_to="2025-12-31")
@@ -69,30 +69,43 @@ def test_next_day_and_imap_date_format() -> None:
 
 
 def test_cursor_roundtrip() -> None:
-    cursor = build_search_cursor("INBOX", 4711)
-    mailbox, uid = parse_search_cursor(cursor) or ("", None)
+    secret = "test-key"
+    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
+    mailbox, uid = parse_search_cursor(payload, expected_query_hash="abc", signing_key=secret)
     assert mailbox == "INBOX"
     assert uid == 4711
 
 
-def test_has_attachment_filter_semantics() -> None:
-    assert _match_has_attachment_flag([], None) is True
-    assert _match_has_attachment_flag([], True) is False
-    assert _match_has_attachment_flag([], False) is True
-    assert _match_has_attachment_flag([1], None) is True
-    assert _match_has_attachment_flag([1], True) is True
-    assert _match_has_attachment_flag([1], False) is False
+def test_cursor_invalid_signature_rejected() -> None:
+    secret = "test-key"
+    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
+    body, signature = payload.split(".", 1)
+    tampered_body = ("x" + body[1:]) if body else "x"
+    payload = f"{tampered_body}.{signature}"
+    with pytest.raises(InvalidSearchParameterError):
+        parse_search_cursor(payload, expected_query_hash="abc", signing_key=secret)
 
 
-def test_cursor_hash_validation() -> None:
-    payload = build_search_cursor("INBOX", 4711, query_hash="abc")
-    parsed = parse_search_cursor(payload, expected_query_hash="abc")
+def test_cursor_query_mismatch_rejected() -> None:
+    secret = "test-key"
+    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
+    with pytest.raises(InvalidSearchParameterError):
+        parse_search_cursor(payload, expected_query_hash="wrong", signing_key=secret)
+
+
+def test_cursor_security_hash_validation_round_trip() -> None:
+    payload = build_search_cursor(
+        "INBOX",
+        uid=4711,
+        query_hash="q",
+        signing_key="cursor-signing-key",
+    )
+    parsed = parse_search_cursor(payload, expected_query_hash="q", signing_key="cursor-signing-key")
     assert parsed == ("INBOX", 4711)
-    assert parse_search_cursor(payload, expected_query_hash="wrong") is None
 
 
 def test_search_cursor_can_scan_batches_for_matches() -> None:
-    client = _FakeImapClient()
+    client = _FakeImapClient({"INBOX": list(range(500, 0, -1))})
     query_hash = _build_search_hash(
         mailboxes=["INBOX"],
         date_from=None,
@@ -115,12 +128,14 @@ def test_search_cursor_can_scan_batches_for_matches() -> None:
         client=client,
         mailboxes=["INBOX"],
         criteria=["ALL"],
-        limit=3,
+        limit=10,
         scan_batch_size=10,
         cursor=None,
+        signing_key="secret",
         query_hash=query_hash,
         match_builder=build_match,
     )
 
-    assert [item["uid"] for item in results] == [100, 80, 60]
-    assert parse_search_cursor(cursor, expected_query_hash=query_hash) == ("INBOX", 59)
+    assert [item["uid"] for item in results] == [500, 480, 460, 440, 420, 400, 380, 360, 340, 320]
+    assert cursor is not None
+    assert parse_search_cursor(cursor, expected_query_hash=query_hash, signing_key="secret") == ("INBOX", 319)

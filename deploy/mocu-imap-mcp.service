@@ -1,0 +1,28 @@
+[Unit]
+Description=MoCu IMAP Connector MCP
+After=network.target
+
+[Service]
+Type=simple
+User=mocu-imap-mcp
+Group=mocu-imap-mcp
+ExecStart=/usr/bin/python3 -m mocu_imap_mcp.server
+WorkingDirectory=/opt/mocu-imap-mcp
+EnvironmentFile=/etc/mocu-imap-mcp.env
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/log/mocu-imap-mcp
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

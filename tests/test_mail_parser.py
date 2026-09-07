@@ -48,6 +48,24 @@ def test_multipart_with_plain_html_and_pdf_attachments() -> None:
     assert has_html is False
 
 
+def test_inline_file_with_filename_is_treated_as_attachment() -> None:
+    msg = MIMEMultipart("related")
+    msg["Subject"] = "Rechnung 9001"
+    msg["From"] = "noreply@example.com"
+    msg["To"] = "buchhaltung@example.org"
+    msg.attach(MIMEText("Bitte anbei", "plain", "utf-8"))
+    msg.attach(MIMEApplication(b"%PDF-1.4\\n%...sample...", _subtype="pdf"))
+    attachment = msg.get_payload()[1]
+    attachment["Content-Disposition"] = "inline; filename=\"rechnung.pdf\""
+
+    raw = msg.as_bytes(policy=policy.default)
+    parsed = message_from_bytes(raw)
+    attachments = find_attachments(parsed)
+    assert len(attachments) == 1
+    assert attachments[0].filename == "rechnung.pdf"
+    assert attachments[0].inline is True
+
+
 def test_singlepart_html_is_sanitized() -> None:
     raw = (
         "<html><style>.x{}</style><script>alert(1)</script>"

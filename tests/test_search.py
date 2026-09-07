@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from mocu_imap_mcp.imap_client import (
+    SearchCursorState,
     _format_imap_date,
     _next_day,
     build_search_cursor,
@@ -16,6 +17,8 @@ from mocu_imap_mcp.tools.search import (
     _build_search_hash,
     _scan_matching_messages,
 )
+
+_TEST_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 
 @dataclass
@@ -69,24 +72,32 @@ def test_next_day_and_imap_date_format() -> None:
 
 
 def test_cursor_roundtrip() -> None:
-    secret = "test-key"
-    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
-    mailbox, uid = parse_search_cursor(payload, expected_query_hash="abc", signing_key=secret)
-    assert mailbox == "INBOX"
-    assert uid == 4711
+    secret = _TEST_KEY
+    payload = build_search_cursor(
+        SearchCursorState(version=3, mailbox_index=0, mailbox="INBOX", before_uid=4711, query_hash="abc"),
+        signing_key=secret,
+    )
+    state = parse_search_cursor(payload, expected_query_hash="abc", signing_key=secret)
+    assert state.mailbox == "INBOX"
+    assert state.before_uid == 4711
 
 
 def test_cursor_without_signing_key_is_rejected() -> None:
     with pytest.raises(ValueError):
-        build_search_cursor("INBOX", uid=1, query_hash="abc", signing_key="")
-    payload = build_search_cursor("INBOX", uid=1, query_hash="abc", signing_key="k")
+        build_search_cursor(SearchCursorState(3, 0, "INBOX", 1, "abc"), signing_key=b"")
     with pytest.raises(ValueError):
-        parse_search_cursor(payload, expected_query_hash="abc", signing_key="")
+        build_search_cursor(SearchCursorState(3, 0, "INBOX", 1, "abc"), signing_key=b"short")
+    payload = build_search_cursor(SearchCursorState(3, 0, "INBOX", 1, "abc"), signing_key=_TEST_KEY)
+    with pytest.raises(InvalidSearchParameterError):
+        parse_search_cursor(payload, expected_query_hash="abc", signing_key=b"")
 
 
 def test_cursor_invalid_signature_rejected() -> None:
-    secret = "test-key"
-    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
+    secret = _TEST_KEY
+    payload = build_search_cursor(
+        SearchCursorState(version=3, mailbox_index=0, mailbox="INBOX", before_uid=4711, query_hash="abc"),
+        signing_key=secret,
+    )
     body, signature = payload.split(".", 1)
     tampered_body = ("x" + body[1:]) if body else "x"
     payload = f"{tampered_body}.{signature}"
@@ -95,21 +106,25 @@ def test_cursor_invalid_signature_rejected() -> None:
 
 
 def test_cursor_query_mismatch_rejected() -> None:
-    secret = "test-key"
-    payload = build_search_cursor("INBOX", uid=4711, query_hash="abc", signing_key=secret)
+    secret = _TEST_KEY
+    payload = build_search_cursor(
+        SearchCursorState(version=3, mailbox_index=0, mailbox="INBOX", before_uid=4711, query_hash="abc"),
+        signing_key=secret,
+    )
     with pytest.raises(InvalidSearchParameterError):
         parse_search_cursor(payload, expected_query_hash="wrong", signing_key=secret)
 
 
 def test_cursor_security_hash_validation_round_trip() -> None:
+    secret = _TEST_KEY
     payload = build_search_cursor(
-        "INBOX",
-        uid=4711,
-        query_hash="q",
-        signing_key="cursor-signing-key",
+        SearchCursorState(version=3, mailbox_index=2, mailbox="Archive", before_uid=4711, query_hash="q"),
+        signing_key=secret,
     )
-    parsed = parse_search_cursor(payload, expected_query_hash="q", signing_key="cursor-signing-key")
-    assert parsed == ("INBOX", 4711)
+    parsed = parse_search_cursor(payload, expected_query_hash="q", signing_key=secret)
+    assert parsed.mailbox == "Archive"
+    assert parsed.mailbox_index == 2
+    assert parsed.before_uid == 4711
 
 
 def test_search_cursor_can_scan_batches_for_matches() -> None:
@@ -139,14 +154,16 @@ def test_search_cursor_can_scan_batches_for_matches() -> None:
         limit=10,
         scan_batch_size=10,
         cursor=None,
-        signing_key="secret",
+        signing_key=_TEST_KEY,
         query_hash=query_hash,
         match_builder=build_match,
     )
 
     assert [item["uid"] for item in results] == [500, 480, 460, 440, 420, 400, 380, 360, 340, 320]
     assert cursor is not None
-    assert parse_search_cursor(cursor, expected_query_hash=query_hash, signing_key="secret") == ("INBOX", 319)
+    parsed = parse_search_cursor(cursor, expected_query_hash=query_hash, signing_key=_TEST_KEY)
+    assert parsed.mailbox == "INBOX"
+    assert parsed.before_uid == 319
 
 
 def test_search_cursor_does_not_regress_to_zero() -> None:
@@ -177,9 +194,8 @@ def test_search_cursor_does_not_regress_to_zero() -> None:
         limit=3,
         scan_batch_size=3,
         cursor=None,
-        signing_key="secret",
+        signing_key=_TEST_KEY,
         query_hash=query_hash,
         match_builder=build_match,
     )
-    # UID 1 is matched on page-boundary and must not produce a cursor to UID 0.
     assert cursor is None

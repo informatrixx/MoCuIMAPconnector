@@ -74,3 +74,14 @@ def test_bodystructure_filename_in_content_disposition() -> None:
     )
     items = iter_attachments_from_bodystructure(raw)
     assert items[0].filename == "rechnung-disp.pdf"
+
+
+def test_bodystructure_case_insensitive_marker_and_literal_filename() -> None:
+    raw = (
+        '((("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 128 4)'
+        '("APPLICATION" "PDF" ("NAME" {18}rechnung-datei.pdf) NIL NIL "BASE64" 2048 NIL '
+        '("INLINE" ("FILENAME" {12}rechnung.pdf)) NIL) "mixed"))'
+    )
+    items = iter_attachments_from_bodystructure(raw)
+    assert any(item.inline for item in items)
+    assert any(item.filename == "rechnung-datei.pdf" for item in items)

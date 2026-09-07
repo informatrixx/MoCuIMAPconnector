@@ -5,38 +5,27 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
 from ..config import Settings
-from ..imap_client import ImapClient, build_search_cursor, parse_search_criteria, parse_search_cursor
+from ..imap_client import (
+    ImapClient,
+    SearchCursorState,
+    build_search_cursor,
+    parse_search_criteria,
+    parse_search_cursor,
+)
 from ..mail_parser import decode_header_value, extract_summary, message_from_bytes, parse_imap_date
-from ..security import PROMPT_INJECTION_WARNING
+from ..security import PROMPT_INJECTION_WARNING, InvalidSearchParameterError
 
 
-class _SearchClientProtocol(Protocol):
-    def search_uids(
-        self,
-        mailbox: str,
-        criteria: list[str],
-        *,
-        before_uid: int | None = None,
-        limit: int,
-    ) -> tuple[list[int], int | None]:
-        ...
-
-    def fetch_headers(
-        self,
-        mailbox: str,
-        uid: int,
-        *,
-        include_all_headers: bool = False,
-    ) -> tuple[bytes, str | None]:
-        ...
-
-    def list_attachments(self, mailbox: str, uid: int) -> list[Any]:
-        ...
+def canonicalize_mailboxes(mailboxes: list[str] | None) -> list[str]:
+    normalized = [mailbox for mailbox in mailboxes or [] if mailbox and mailbox.strip()]
+    unique = list(dict.fromkeys([mailbox.strip() for mailbox in normalized]))
+    unique.sort()
+    return unique
 
 
 def _apply_invoice_match(
@@ -57,8 +46,11 @@ def _apply_invoice_match(
             matched.append(f"subject:{lower}")
             break
 
-    if any(typ.lower() == "pdf" or typ.lower().endswith("/pdf") for typ in attachment_types):
-        matched.append("attachment:pdf")
+    for typ in attachment_types:
+        lower = typ.lower()
+        if lower == "pdf" or lower.endswith("/pdf"):
+            matched.append("attachment:pdf")
+            break
 
     for filename in attachment_filenames:
         filename_lower = filename.lower()
@@ -78,8 +70,11 @@ def _match_has_attachment_flag(attachments: list[Any], has_attachment: bool | No
 
 
 def _build_query_hash(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(canonical).hexdigest()
+    payload = dict(payload)
+    mailboxes = payload.get("mailboxes")
+    payload["mailboxes"] = canonicalize_mailboxes(mailboxes if isinstance(mailboxes, list) else None)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def _build_search_hash(
@@ -97,7 +92,7 @@ def _build_search_hash(
 ) -> str:
     return _build_query_hash(
         {
-            "mailboxes": sorted(mailboxes or []),
+            "mailboxes": canonicalize_mailboxes(mailboxes),
             "date_from": date_from or "",
             "date_to": date_to or "",
             "from_address": from_address or "",
@@ -117,87 +112,103 @@ def _build_invoice_query_hash(date_from: str | None, date_to: str | None, mailbo
         {
             "date_from": date_from or "",
             "date_to": date_to or "",
-            "mailboxes": sorted(mailboxes or []),
+            "mailboxes": canonicalize_mailboxes(mailboxes),
             "tool": "find_invoice_candidates",
         },
     )
 
 
+def _build_next_cursor(
+    *,
+    query_hash: str,
+    mailboxes: list[str],
+    mailbox_index: int,
+    before_uid: int | None,
+    signing_key: bytes,
+) -> str:
+    state = SearchCursorState(
+        version=3,
+        mailbox_index=mailbox_index,
+        mailbox=mailboxes[mailbox_index],
+        before_uid=before_uid,
+        query_hash=query_hash,
+    )
+    return build_search_cursor(state, signing_key=signing_key)
+
+
 def _scan_matching_messages(
     *,
-    client: _SearchClientProtocol,
+    client: ImapClient,
     mailboxes: list[str],
     criteria: list[str],
     limit: int,
     scan_batch_size: int,
     cursor: str | None,
-    signing_key: str,
+    signing_key: bytes,
     query_hash: str,
     match_builder: Callable[[str, int], dict[str, Any] | None],
 ) -> tuple[list[dict[str, Any]], str | None]:
-    cursor_state = (
-        parse_search_cursor(cursor, expected_query_hash=query_hash, signing_key=signing_key) if cursor else None
-    )
-    cursor_mailbox = cursor_state[0] if cursor_state else None
-    cursor_uid = cursor_state[1] if cursor_state else None
+    start_index = 0
+    start_before_uid: int | None = None
 
-    try:
-        start_index = mailboxes.index(cursor_mailbox) if cursor_mailbox in mailboxes else 0
-    except ValueError:
-        start_index = 0
-        cursor_uid = None
-
-    if cursor_state and cursor_uid is not None and cursor_mailbox not in mailboxes:
-        # ignore cursor for incompatible mailbox sets to avoid surprising reuse.
-        cursor_uid = None
+    if cursor is not None:
+        state = parse_search_cursor(
+            cursor,
+            expected_query_hash=query_hash,
+            signing_key=signing_key,
+            expected_mailbox_count=len(mailboxes),
+        )
+        if state.mailbox_index >= len(mailboxes) or mailboxes[state.mailbox_index] != state.mailbox:
+            raise InvalidSearchParameterError("Ungültiger Cursor")
+        start_index = state.mailbox_index
+        start_before_uid = state.before_uid
 
     results: list[dict[str, Any]] = []
     next_cursor: str | None = None
 
-    for mailbox in mailboxes[start_index:]:
-        current_cursor = cursor_uid if mailbox == cursor_mailbox else None
+    for mailbox_index in range(start_index, len(mailboxes)):
+        current_cursor = start_before_uid if mailbox_index == start_index else None
 
-        while len(results) < limit:
+        while True:
             uids, batch_cursor = client.search_uids(
-                mailbox,
+                mailboxes[mailbox_index],
                 criteria,
-                limit=scan_batch_size,
                 before_uid=current_cursor,
+                limit=scan_batch_size,
             )
             if not uids:
                 break
 
             for uid in uids:
-                entry = match_builder(mailbox, uid)
+                entry = match_builder(mailboxes[mailbox_index], uid)
                 if entry is not None:
                     results.append(entry)
                     if len(results) >= limit:
-                        next_uid = uid - 1
-                        if next_uid < 1:
-                            return results, None
-                        next_cursor = build_search_cursor(
-                            mailbox,
-                            uid=next_uid,
-                            query_hash=query_hash,
-                            signing_key=signing_key,
-                        )
+                        before_uid = uid - 1
+                        if before_uid >= 1:
+                            next_cursor = _build_next_cursor(
+                                query_hash=query_hash,
+                                mailboxes=mailboxes,
+                                mailbox_index=mailbox_index,
+                                before_uid=before_uid,
+                                signing_key=signing_key,
+                            )
+                        elif mailbox_index + 1 < len(mailboxes):
+                            next_cursor = _build_next_cursor(
+                                query_hash=query_hash,
+                                mailboxes=mailboxes,
+                                mailbox_index=mailbox_index + 1,
+                                before_uid=None,
+                                signing_key=signing_key,
+                            )
                         return results, next_cursor
-
-            if not batch_cursor:
+            if batch_cursor is None:
                 break
-
             current_cursor = batch_cursor
-            if current_cursor is None or current_cursor <= 0:
-                break
 
-        if len(results) >= limit:
-            break
+        start_before_uid = None
 
-        # move to next mailbox on next run
-        cursor_uid = None
-        cursor_mailbox = mailbox
-
-    return results, next_cursor
+    return results, None
 
 
 def register_search_tools(server: MCPServer, settings: Settings) -> None:
@@ -229,8 +240,10 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
         limit = max(1, min(limit, settings.max_search_results))
 
         with ImapClient(settings) as client:
-            if not mailboxes:
-                mailboxes = [item.name for item in client.list_mailboxes() if item.selectable]
+            selected_mailboxes = canonicalize_mailboxes(mailboxes)
+            if not selected_mailboxes:
+                selected_mailboxes = [item.name for item in client.list_mailboxes() if item.selectable]
+                selected_mailboxes = canonicalize_mailboxes(selected_mailboxes)
 
             criteria = parse_search_criteria(
                 date_from=date_from,
@@ -243,7 +256,7 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
             )
 
             query_hash = _build_search_hash(
-                mailboxes=mailboxes,
+                mailboxes=selected_mailboxes,
                 date_from=date_from,
                 date_to=date_to,
                 from_address=from_address,
@@ -289,12 +302,12 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
 
             items, next_cursor = _scan_matching_messages(
                 client=client,
-                mailboxes=mailboxes,
+                mailboxes=selected_mailboxes,
                 criteria=criteria,
                 limit=limit,
                 scan_batch_size=max(1, min(settings.search_scan_batch_size, settings.max_search_results)),
                 cursor=cursor,
-                signing_key=settings.cursor_signing_key,
+                signing_key=settings.cursor_signing_key_bytes(),
                 query_hash=query_hash,
                 match_builder=_match,
             )
@@ -342,11 +355,13 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
         attachment_terms = ["rechnung", "invoice", "receipt", "beleg"]
 
         with ImapClient(settings) as client:
-            if not mailboxes:
-                mailboxes = [item.name for item in client.list_mailboxes() if item.selectable]
+            selected_mailboxes = canonicalize_mailboxes(mailboxes)
+            if not selected_mailboxes:
+                selected_mailboxes = [item.name for item in client.list_mailboxes() if item.selectable]
+                selected_mailboxes = canonicalize_mailboxes(selected_mailboxes)
 
             criteria = parse_search_criteria(date_from=date_from, date_to=date_to)
-            query_hash = _build_invoice_query_hash(mailboxes=mailboxes, date_from=date_from, date_to=date_to)
+            query_hash = _build_invoice_query_hash(date_from=date_from, date_to=date_to, mailboxes=selected_mailboxes)
 
             def _match(mailbox: str, uid: int) -> dict[str, Any] | None:
                 headers_raw, _internal_date = client.fetch_headers(mailbox, uid, include_all_headers=True)
@@ -378,12 +393,12 @@ def register_search_tools(server: MCPServer, settings: Settings) -> None:
 
             candidates, next_cursor = _scan_matching_messages(
                 client=client,
-                mailboxes=mailboxes,
+                mailboxes=selected_mailboxes,
                 criteria=criteria,
                 limit=limit,
                 scan_batch_size=max(1, min(settings.search_scan_batch_size, settings.max_search_results)),
                 cursor=cursor,
-                signing_key=settings.cursor_signing_key,
+                signing_key=settings.cursor_signing_key_bytes(),
                 query_hash=query_hash,
                 match_builder=_match,
             )

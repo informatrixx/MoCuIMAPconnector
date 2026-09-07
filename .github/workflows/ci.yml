@@ -34,3 +34,8 @@ jobs:
 
       - name: Pytest
         run: python -m pytest
+
+      - name: MCP smoke test
+        env:
+          CURSOR_SIGNING_KEY_HEX: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        run: python scripts/test_mcp.py

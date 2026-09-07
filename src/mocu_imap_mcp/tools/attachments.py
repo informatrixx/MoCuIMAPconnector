@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import urllib.parse
+from collections.abc import Callable
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -11,19 +12,34 @@ from ..config import Settings
 from ..imap_client import ImapClient
 from ..security import PROMPT_INJECTION_WARNING
 
+_RESOURCE_MIME_MAP: tuple[tuple[str, str], ...] = (
+    ("application/pdf", "application/pdf"),
+    ("text/plain", "text/plain"),
+    ("text/csv", "text/csv"),
+    ("text/html", "text/html"),
+    ("application/json", "application/json"),
+    ("application/xml", "application/xml"),
+    ("image/jpeg", "image/jpeg"),
+    ("image/jpg", "image/jpeg"),
+    ("image/png", "image/png"),
+    ("image/gif", "image/gif"),
+    ("image/webp", "image/webp"),
+    ("application/zip", "application/zip"),
+)
+
 
 def _resource_mime_from_content_type(content_type: str) -> str:
     normalized = (content_type or "").lower().strip()
-    if normalized == "application/pdf":
+    if normalized in dict(_RESOURCE_MIME_MAP):
+        return dict(_RESOURCE_MIME_MAP)[normalized]
+    if normalized.startswith("text/"):
+        if normalized == "text/plain":
+            return "text/plain"
+        if normalized == "text/csv":
+            return "text/csv"
+        return "text/plain"
+    if normalized.startswith("application/") and normalized == "application/pdf":
         return "application/pdf"
-    if normalized in {"image/jpeg", "image/jpg"}:
-        return "image/jpeg"
-    if normalized == "image/png":
-        return "image/png"
-    if normalized == "image/gif":
-        return "image/gif"
-    if normalized == "image/webp":
-        return "image/webp"
     return "application/octet-stream"
 
 
@@ -31,6 +47,18 @@ def _resource_prefix(content_type: str) -> str:
     mime = _resource_mime_from_content_type(content_type)
     if mime == "application/pdf":
         return "pdf"
+    if mime == "text/plain":
+        return "txt"
+    if mime == "text/csv":
+        return "csv"
+    if mime == "text/html":
+        return "html"
+    if mime.startswith("text/"):
+        return "text"
+    if mime == "application/json":
+        return "json"
+    if mime == "application/xml":
+        return "xml"
     if mime == "image/jpeg":
         return "jpeg"
     if mime == "image/png":
@@ -39,6 +67,8 @@ def _resource_prefix(content_type: str) -> str:
         return "gif"
     if mime == "image/webp":
         return "webp"
+    if mime == "application/zip":
+        return "zip"
     return "octet"
 
 
@@ -71,14 +101,16 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
             attachments = client.list_attachments(mailbox, uid)
             detail_list: list[dict[str, Any]] = []
             for attachment in attachments:
-                entry = {
-                    "part_id": attachment.part_id,
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "size": attachment.size,
-                    "sha256": None,
-                }
-                detail_list.append(entry)
+                detail_list.append(
+                    {
+                        "part_id": attachment.part_id,
+                        "filename": attachment.filename,
+                        "content_type": attachment.content_type,
+                        "size": attachment.size,
+                        "sha256": None,
+                        "inline": bool(attachment.inline),
+                    },
+                )
 
         logger.info(
             "tool=list_attachments duration=%.3fs mailbox=%s uid=%s count=%s",
@@ -131,58 +163,37 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
             "filename": attachment.filename,
             "content_type": attachment.content_type,
             "size": attachment.size,
+            "inline": bool(attachment.inline),
         }
 
-    @server.resource(
-        "mocu://attachment-pdf/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen PDF-Anhang.",
-        mime_type="application/pdf",
+    _mime_resources = (
+        ("pdf", "application/pdf"),
+        ("txt", "text/plain"),
+        ("html", "text/html"),
+        ("text", "text/plain"),
+        ("csv", "text/csv"),
+        ("json", "application/json"),
+        ("xml", "application/xml"),
+        ("jpeg", "image/jpeg"),
+        ("png", "image/png"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("zip", "application/zip"),
+        ("octet", "application/octet-stream"),
     )
-    def read_attachment_resource(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
 
-    @server.resource(
-        "mocu://attachment-jpeg/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen JPEG-Anhang.",
-        mime_type="image/jpeg",
-    )
-    def read_attachment_resource_jpeg(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
+    for resource_prefix, mime_type in _mime_resources:
+        def _make_reader(prefix: str, _mime_type: str) -> Callable[[str, int, str], bytes]:
+            @server.resource(
+                f"mocu://attachment-{prefix}/{{mailbox_token}}/{{uid}}/{{part_id}}",
+                name=f"imap-attachment-{prefix}",
+                description=f"Binärer Zugriff auf Anhänge ({_mime_type}).",
+                mime_type=_mime_type,
+            )
+            def _reader(mailbox_token: str, uid: int, part_id: str) -> bytes:
+                return _read_attachment(mailbox_token, uid, part_id, settings)
 
-    @server.resource(
-        "mocu://attachment-png/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen PNG-Anhang.",
-        mime_type="image/png",
-    )
-    def read_attachment_resource_png(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
+            _reader.__name__ = f"read_attachment_resource_{prefix}"
+            return _reader
 
-    @server.resource(
-        "mocu://attachment-gif/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen GIF-Anhang.",
-        mime_type="image/gif",
-    )
-    def read_attachment_resource_gif(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
-
-    @server.resource(
-        "mocu://attachment-webp/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen WebP-Anhang.",
-        mime_type="image/webp",
-    )
-    def read_attachment_resource_webp(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
-
-    @server.resource(
-        "mocu://attachment-octet/{mailbox_token}/{uid}/{part_id}",
-        name="imap-attachment",
-        description="Binärer Zugriff auf einen Anhang.",
-        mime_type="application/octet-stream",
-    )
-    def read_attachment_resource_octet(mailbox_token: str, uid: int, part_id: str) -> bytes:
-        return _read_attachment(mailbox_token, uid, part_id, settings)
+        locals()[f"_resource_reader_{resource_prefix}"] = _make_reader(resource_prefix, mime_type)

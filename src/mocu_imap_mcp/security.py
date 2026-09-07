@@ -37,6 +37,10 @@ class AttachmentTooLargeError(ValueError):
     """Anhang überschreitet das konfigurierbare Größenlimit."""
 
 
+class MessageTooLargeError(ValueError):
+    """Nachricht überschreitet das konfigurierbare Größenlimit."""
+
+
 class InvalidSearchParameterError(ValueError):
     """Ungültige Suchparameter."""
 

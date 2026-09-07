@@ -3,7 +3,7 @@
 Produktionsfähiger, read-only MCP-Server für den kontrollierten Zugriff auf ein GMX-IMAP-Postfach.
 
 - **Read-only**: Es werden nur Mails gelesen. Es werden keine Mails gelöscht, verschoben, markiert, versendet oder in andere Ordner geschrieben.
-- **MCP-Server**: Streamable-HTTP (MCP-SDK 2.0.0).
+- **MCP-Server**: Streamable-HTTP (MCP-Python-SDK, aktuelle Version im Projekt).
 - **Sicherheit**: Keine externen APIs, keine Index-DB, keine Telemetrie, keine Persistenz von Mail-Inhalten.
 
 ## 1) Technologieprüfung
@@ -19,7 +19,8 @@ Diese Version wird verwendet, sofern keine neuere stabile und produktionsrelevan
 ## 2) Installation
 
 ```bash
-cd /var/codex/MoCuIMAPconnector
+sudo install -d -o mocu-imap-mcp -g mocu-imap-mcp /opt/mocu-imap-mcp
+cd /opt/mocu-imap-mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -32,7 +33,7 @@ Lege eine eigene `.env` an (siehe `.env.example`) und fülle nur folgende Werte 
 ```env
 IMAP_HOST=imap.gmx.net
 IMAP_PORT=993
-IMAP_SSL=true
+IMAP_TLS_MODE=ssl
 
 IMAP_USERNAME=
 IMAP_PASSWORD=
@@ -40,14 +41,16 @@ IMAP_PASSWORD=
 MCP_BIND=127.0.0.1
 MCP_PORT=8765
 MCP_HTTP_PATH=/mcp
-CURSOR_SIGNING_KEY=
-MCP_ALLOWED_HOSTS=["127.0.0.1", "127.0.0.1:*"]
-MCP_ALLOWED_ORIGINS=["https://127.0.0.1", "https://localhost", "http://127.0.0.1", "http://localhost"]
+CURSOR_SIGNING_KEY_HEX=
+MCP_ALLOWED_HOSTS=127.0.0.1,127.0.0.1:*
+MCP_ALLOWED_ORIGINS=https://127.0.0.1,https://localhost,http://127.0.0.1,http://localhost
 SEARCH_SCAN_BATCH_SIZE=100
 
 MAX_SEARCH_RESULTS=100
 DEFAULT_SEARCH_LIMIT=50
 MAX_ATTACHMENT_SIZE_MB=25
+MAX_MESSAGE_SIZE_MB=50
+MAX_BODY_CHARS=200000
 MCP_MAX_REQUEST_BODY_SIZE=4194304
 LOG_LEVEL=INFO
 ```
@@ -58,7 +61,7 @@ Hinweise:
 - Für `IMAP_PASSWORD` ausschließlich ein **anwendungsspezifisches Passwort** verwenden.
 - Passwort niemals in ChatGPT-Eingaben, Logs oder Tickets einfügen.
 - Zugriff nur mit diesem Postfach-User und App-Passwort.
-- `CURSOR_SIGNING_KEY` muss gesetzt werden (kein Standard-/Fallbackwert).
+- `CURSOR_SIGNING_KEY_HEX` oder `CURSOR_SIGNING_KEY` muss gesetzt werden (kein Standard-/Fallbackwert).
 
 ## 4) MCP-Tools
 
@@ -179,7 +182,7 @@ Siehe [`deploy/mocu-imap-mcp.service`](deploy/mocu-imap-mcp.service) und Beispie
 
 - `IMAP_HOST`
 - `IMAP_PORT`
-- `IMAP_SSL`
+- `IMAP_TLS_MODE`
 - `IMAP_USERNAME`
 - `IMAP_PASSWORD`
 - `IMAP_CONNECTION_TIMEOUT`
@@ -195,6 +198,7 @@ Siehe [`deploy/mocu-imap-mcp.service`](deploy/mocu-imap-mcp.service) und Beispie
 - `MCP_MAX_REQUEST_BODY_SIZE`
 - `LOG_LEVEL`
 - `CURSOR_SIGNING_KEY`
+- `CURSOR_SIGNING_KEY_HEX`
 - `MCP_ALLOWED_HOSTS`
 - `MCP_ALLOWED_ORIGINS`
 

@@ -10,26 +10,28 @@ from mocu_imap_mcp.models import AttachmentMeta
 from mocu_imap_mcp.security import AttachmentTooLargeError
 from mocu_imap_mcp.tools.attachments import _resource_prefix
 
+_TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 
 def test_attachment_decode_base64() -> None:
-    client = ImapClient(Settings(imap_username="u", imap_password="p"))
+    client = ImapClient(Settings(imap_username="u", imap_password="p", cursor_signing_key=_TEST_KEY))
     payload = base64.b64encode(b"Hello")
     decoded = client._decode_attachment_bytes(payload, "BASE64")
     assert decoded == b"Hello"
 
 
 def test_attachment_decode_quoted_printable() -> None:
-    client = ImapClient(Settings(imap_username="u", imap_password="p"))
+    client = ImapClient(Settings(imap_username="u", imap_password="p", cursor_signing_key=_TEST_KEY))
     assert client._decode_attachment_bytes(b"Hallo=20Welt", "quoted-printable") == b"Hallo Welt"
 
 
 def test_attachment_decode_7bit_passthrough() -> None:
-    client = ImapClient(Settings(imap_username="u", imap_password="p"))
+    client = ImapClient(Settings(imap_username="u", imap_password="p", cursor_signing_key=_TEST_KEY))
     assert client._decode_attachment_bytes(b"Raw", "7BIT") == b"Raw"
 
 
 def test_attachment_size_limit_prevents_fetch() -> None:
-    settings = Settings(imap_username="u", imap_password="p", max_attachment_size_mb=1)
+    settings = Settings(imap_username="u", imap_password="p", max_attachment_size_mb=1, cursor_signing_key=_TEST_KEY)
     client = ImapClient(settings)
 
     def fake_list_attachments(_mailbox: str, _uid: int) -> list[AttachmentMeta]:

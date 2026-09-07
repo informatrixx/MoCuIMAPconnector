@@ -40,6 +40,7 @@ class MailDetail(BaseModel):
     subject: str | None = None
     text_body: str = ""
     html_available: bool = False
+    text_body_truncated: bool = False
     attachments: list[AttachmentInfo] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
@@ -51,6 +52,7 @@ class AttachmentInfo(BaseModel):
     content_type: str | None = None
     size: int | None = None
     sha256: str | None = None
+    inline: bool | None = None
 
 
 class AttachmentMeta(BaseModel):

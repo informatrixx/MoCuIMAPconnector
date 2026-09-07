@@ -14,70 +14,109 @@ def _tokenize_bodystructure(raw: str) -> list[object]:
     raw = raw.strip()
     index = 0
     length = len(raw)
+    tokens: list[object] = []
 
     def skip_ws() -> None:
         nonlocal index
         while index < length and raw[index].isspace():
             index += 1
 
+    def parse_atom() -> object:
+        nonlocal index
+        start = index
+        while index < length and not raw[index].isspace() and raw[index] not in {"(", ")", "\"", "{"}:
+            index += 1
+        if index == start:
+            return _NO_TOKEN
+        value = raw[start:index]
+        if value.upper() == "NIL":
+            return None
+        return value
+
+    def parse_quoted() -> object:
+        nonlocal index
+        index += 1
+        chars: list[str] = []
+        while index < length:
+            current = raw[index]
+            if current == "\\":
+                index += 1
+                if index >= length:
+                    break
+                chars.append(raw[index])
+                index += 1
+                continue
+            if current == '"':
+                index += 1
+                break
+            chars.append(current)
+            index += 1
+        return "".join(chars)
+
+    def parse_literal() -> object:
+        nonlocal index
+        # we are at '{'
+        start = index + 1
+        end = raw.find("}", start)
+        if end == -1:
+            raise ValueError("Ungültige Literal-Kennung")
+        size_raw = raw[start:end]
+        size_text = size_raw.strip()
+        if not size_text.isdigit():
+            raise ValueError("Ungültige Literal-Größe")
+        size = int(size_text)
+        index = end + 1
+        while index < length and raw[index].isspace():
+            index += 1
+        value = raw[index : index + size]
+        index += size
+        return value
+
+    def parse_list() -> object:
+        nonlocal index
+        index += 1
+        children: list[object] = []
+        while index < length:
+            skip_ws()
+            if index >= length:
+                break
+            if raw[index] == ")":
+                index += 1
+                break
+            child = parse_token()
+            if child is not _NO_TOKEN:
+                children.append(child)
+            skip_ws()
+        return children
+
     def parse_token() -> object:
         nonlocal index
         skip_ws()
         if index >= length:
             return _NO_TOKEN
-
         char = raw[index]
+        if char == "(":
+            return parse_list()
         if char == ")":
             index += 1
             return _NO_TOKEN
-        if char == "(":
-            index += 1
-            parts: list[object] = []
-            while index < length:
-                skip_ws()
-                if index >= length:
-                    break
-                if raw[index] == ")":
-                    index += 1
-                    break
-                value = parse_token()
-                if value is not _NO_TOKEN:
-                    parts.append(value)
-                skip_ws()
-            return parts
-
         if char == '"':
-            index += 1
-            chars: list[str] = []
-            while index < length:
-                current = raw[index]
-                if current == "\\" and index + 1 < length:
-                    index += 1
-                    chars.append(raw[index])
-                    index += 1
-                    continue
-                if current == '"':
-                    index += 1
-                    break
-                chars.append(current)
-                index += 1
-            return "".join(chars)
+            return parse_quoted()
+        if char == "{":
+            return parse_literal()
+        atom = parse_atom()
+        if atom is _NO_TOKEN:
+            return _NO_TOKEN
+        return atom
 
-        start = index
-        while index < length and not raw[index].isspace() and raw[index] not in {"(", ")"}:
-            index += 1
-        token = raw[start:index]
-        if token.upper() == "NIL":
-            return None
-        return token
-
-    values: list[object] = []
     while index < length:
-        value = parse_token()
-        if value is not _NO_TOKEN:
-            values.append(value)
+        token = parse_token()
+        if token is _NO_TOKEN:
+            break
+        tokens.append(token)
         skip_ws()
-    return values
+
+    return tokens
 
 
 def parse_bodystructure(raw: str) -> list[object]:
@@ -91,8 +130,6 @@ def _params_to_dict(values: list[object]) -> dict[str, str]:
         key = values[index]
         if isinstance(key, str) and index + 1 < len(values) and isinstance(values[index + 1], (str, int)):
             result[str(key).upper()] = str(values[index + 1])
-        elif not isinstance(key, str):
-            break
         index += 2
     return result
 
@@ -102,8 +139,10 @@ def _parse_int(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
     return None
 
 
@@ -115,9 +154,7 @@ def _iter_extension_fields(node: list[object], start: int) -> Iterable[object]:
 
 def _find_disposition(node: list[object], start: int) -> tuple[str | None, list[object] | None]:
     for value in _iter_extension_fields(node, start):
-        if not isinstance(value, list):
-            continue
-        if not value:
+        if not isinstance(value, list) or len(value) == 0:
             continue
         first = value[0]
         if not isinstance(first, str) or first.upper() not in {"INLINE", "ATTACHMENT", "RENDER"}:
@@ -128,9 +165,6 @@ def _find_disposition(node: list[object], start: int) -> tuple[str | None, list[
 
 
 def _extension_scan_start(content_type: str) -> int:
-    # Keep known fixed field positions for the most common single-part types, then
-    # scan all remaining fields to avoid brittle offsets for unusual server
-    # implementations.
     if content_type == "TEXT":
         return 8
     if content_type == "MESSAGE":
@@ -139,8 +173,6 @@ def _extension_scan_start(content_type: str) -> int:
 
 
 def _disposition_from_node(node: list[object], content_type: str) -> tuple[str | None, list[object] | None]:
-    # Primary scan starts near IMAP fixed fields; fallback to full-node scan so
-    # odd structures still behave reasonably.
     start = _extension_scan_start(content_type)
     disposition, disposition_params = _find_disposition(node, start)
     if disposition is not None:
@@ -164,7 +196,7 @@ def _extract_attachment(node: list[object], part_id: str) -> BodyStructureAttach
     params = node[2] if len(node) > 2 and isinstance(node[2], list) else []
     fixed_params = _params_to_dict(params) if isinstance(params, list) else {}
     size = _parse_int(node[6]) if len(node) > 6 else None
-    transfer_encoding = str(node[5]) if len(node) > 5 and isinstance(node[5], str) else None
+    transfer_encoding = str(node[5]) if len(node) > 5 and isinstance(node[5], (str, int)) else None
 
     disposition, disposition_params = _disposition_from_node(node, content_type)
     filename = fixed_params.get("NAME") or fixed_params.get("FILENAME")
@@ -174,12 +206,6 @@ def _extract_attachment(node: list[object], part_id: str) -> BodyStructureAttach
         filename = disposition_params_dict.get("NAME") or disposition_params_dict.get("FILENAME")
 
     is_inline = disposition == "INLINE"
-    if not filename and not is_inline:
-        filename = fixed_params.get("NAME")
-
-    if is_inline and disposition != "ATTACHMENT":
-        return None
-
     has_attachment = bool(filename) or (disposition == "ATTACHMENT")
     if not has_attachment:
         return None
@@ -195,26 +221,13 @@ def _extract_attachment(node: list[object], part_id: str) -> BodyStructureAttach
 
 
 def _is_multipart(node: list[object]) -> bool:
-    if len(node) < 2:
-        return False
-    if not isinstance(node[0], list):
-        return False
-
-    index = 1
-    while index < len(node) and isinstance(node[index], list):
-        index += 1
-    return index < len(node) and isinstance(node[index], str)
+    return bool(node) and isinstance(node[0], list)
 
 
 def _walk_multipart(node: list[object], part_id: str, attachments: list[BodyStructureAttachment]) -> None:
-    children: list[object] = []
-    for child in node:
-        if isinstance(child, list):
-            children.append(child)
-            continue
-        break
-
-    for index, child in enumerate(children, start=1):
+    for index, child in enumerate(node, start=1):
+        if not isinstance(child, list):
+            break
         child_id = str(index) if not part_id else f"{part_id}.{index}"
         walk_bodystructure_part(child, child_id, attachments)
 
@@ -242,6 +255,7 @@ def iter_attachments_from_bodystructure(raw: str) -> list[BodyStructureAttachmen
     root: list[object] = parsed
     while len(root) == 1 and isinstance(root[0], list):
         root = root[0]
+
     attachments: list[BodyStructureAttachment] = []
     walk_bodystructure_part(root, "", attachments)
     return attachments

@@ -65,3 +65,20 @@ def test_extract_bodystructure_from_fetch() -> None:
 def test_search_criteria_date_range_inclusive() -> None:
     criteria = parse_search_criteria(date_from="2025-01-01", date_to="2025-12-31")
     assert criteria == ["SINCE", "01-Jan-2025", "BEFORE", "01-Jan-2026"]
+
+
+def test_extract_internal_date_reads_raw_internaldate() -> None:
+    data = [
+        b'1 (UID 1 BODY[HEADER] {5}',
+        b"hello",
+        b")",
+        b' INTERNALDATE "1-Jan-2000 00:00:00 +0000")',
+    ]
+    from mocu_imap_mcp.imap_client import extract_internal_date
+
+    assert extract_internal_date(data) == "2000-01-01T00:00:00+00:00"
+
+
+def test_build_uid_search_query_allows_binary_payload() -> None:
+    query = _build_uid_search_query(["FROM", _quote_imap_string("Rechnung März")])
+    assert query[:2] == ("CHARSET", "UTF-8")

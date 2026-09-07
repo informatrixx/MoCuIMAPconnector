@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Any, TypeVar
 
 from .bodystructure import iter_attachments_from_bodystructure
-from .config import Settings, get_settings
+from .config import Settings
 from .mail_parser import parse_internal_imap_date
 from .models import AttachmentMeta
 from .security import (
@@ -29,15 +29,18 @@ from .security import (
     InvalidSearchParameterError,
     MailboxNotFoundError,
     MessageNotFoundError,
+    MessageTooLargeError,
 )
 
 logger = logging.getLogger("mocu_imap_mcp.imap")
+
+_IMAP_ERROR = imaplib.IMAP4.error
+_IMAP_ABORT = imaplib.IMAP4.abort
 
 
 _LITERAL_RE = re.compile(rb"\{(\d+)\}\s*$")
 _INTERNAL_DATE_RE = re.compile(r"INTERNALDATE\s+\"([^\"]+)\"", flags=re.IGNORECASE)
 _INVALID_SEARCH_CHARS = re.compile(r"[\x00\r\n]")
-_UNSAFE_CURSOR_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _R = TypeVar("_R")
 
 
@@ -50,6 +53,15 @@ class RetryCause(StrEnum):
 class MailboxInfo:
     name: str
     selectable: bool
+
+
+@dataclass(frozen=True)
+class SearchCursorState:
+    version: int
+    mailbox_index: int
+    mailbox: str
+    before_uid: int | None
+    query_hash: str
 
 
 def _as_text(data: bytes | str) -> str:
@@ -156,83 +168,28 @@ def encode_mailbox_name(value: str) -> str:
 
 def extract_fetch_metadata(data: list[Any]) -> list[bytes]:
     """Extract plain FETCH metadata blocks from imaplib response tuples."""
-    metadata: list[bytes] = []
-    if not data:
-        return metadata
-
-    skip_next = False
-    for item_index, item in enumerate(data or []):
-        if isinstance(item, tuple):
-            parts = [_to_bytes(part) for part in item if isinstance(part, (bytes, str))]
-            skip_next_tuple = False
-            for part in parts:
-                if skip_next_tuple:
-                    skip_next_tuple = False
-                    continue
-                if _LITERAL_RE.search(part):
-                    metadata.append(part)
-                    skip_next_tuple = True
-                    continue
-                if part.strip() in {b")", b""}:
-                    continue
-                metadata.append(part)
-            continue
-
-        if isinstance(item, (bytes, str)):
-            value = _to_bytes(item)
-            if skip_next:
-                skip_next = False
-                continue
-            if _LITERAL_RE.search(value):
-                metadata.append(value)
-                if _LITERAL_RE.search(value) and item_index + 1 < len(data):
-                    next_item = data[item_index + 1]
-                    if isinstance(next_item, (bytes, str)):
-                        skip_next = True
-                continue
-            if value.strip() not in {b")", b""}:
-                metadata.append(value)
-    return metadata
+    return [item for item in _iter_fetch_tokens(data) if item.strip() not in {b")", b""}]
 
 
 def extract_fetch_literals(data: list[Any]) -> list[bytes]:
     """Return all detected literal payload blocks from FETCH data."""
     literals: list[bytes] = []
-    if not data:
-        return literals
-
-    for item_index, item in enumerate(data):
-        if not isinstance(item, (tuple, bytes, str)):
+    tokens = _iter_fetch_tokens(data)
+    for index, token in enumerate(tokens):
+        if not _LITERAL_RE.search(token):
             continue
-
-        if isinstance(item, tuple):
-            parts = [_to_bytes(part) for part in item if isinstance(part, (bytes, str))]
-        else:
-            parts = [_to_bytes(item)]
-
-        for index, part in enumerate(parts):
-            if not _LITERAL_RE.search(part):
-                continue
-
-            if isinstance(item, tuple):
-                if index + 1 >= len(parts):
-                    continue
-                literal = parts[index + 1]
-            elif item_index + 1 < len(data) and isinstance(data[item_index + 1], (bytes, str)):
-                literal = _to_bytes(data[item_index + 1])
-            else:
-                continue
-
-            expected_match = _LITERAL_RE.search(part)
-            expected = int(expected_match.group(1)) if expected_match else len(literal)
-            if expected != len(literal):
-                logger.debug(
-                    "extract_fetch_literals size mismatch expected=%s actual=%s",
-                    expected,
-                    len(literal),
-                )
-            literals.append(literal)
-
+        if index + 1 >= len(tokens):
+            continue
+        literal = tokens[index + 1]
+        expected_match = _LITERAL_RE.search(token)
+        expected = int(expected_match.group(1)) if expected_match else len(literal)
+        if expected != len(literal):
+            logger.debug(
+                "extract_fetch_literals size mismatch expected=%s actual=%s",
+                expected,
+                len(literal),
+            )
+        literals.append(literal)
     return literals
 
 
@@ -249,17 +206,16 @@ def extract_bodystructure_from_fetch(data: list[Any]) -> str | None:
         return None
 
     joined = b" ".join(metadata).decode("utf-8", errors="replace")
-    marker = "BODYSTRUCTURE"
-    index = joined.find(marker)
-    if index < 0:
+    marker = re.search(r"bodystructure", joined, flags=re.IGNORECASE)
+    if marker is None:
         return None
 
-    body = joined[index + len(marker) :]
+    index = marker.end()
+    body = joined[index:]
     bracket_start = body.find("(")
     if bracket_start < 0:
         return None
-
-    start = index + len(marker) + bracket_start
+    start = index + bracket_start
     position = start
     depth = 0
     in_quote = False
@@ -289,11 +245,46 @@ def extract_bodystructure_from_fetch(data: list[Any]) -> str | None:
 
 
 def extract_internal_date(data: list[Any]) -> str | None:
-    for metadata in extract_fetch_metadata(data):
-        match = _INTERNAL_DATE_RE.search(_safe_text_decode(metadata))
-        if match:
-            return parse_internal_imap_date(match.group(1))
+    joined = b" ".join(_iter_fetch_tokens(data))
+    match = _INTERNAL_DATE_RE.search(_safe_text_decode(joined))
+    if match:
+        return parse_internal_imap_date(match.group(1))
     return None
+
+
+def _iter_fetch_tokens(data: list[Any]) -> list[bytes]:
+    tokens: list[bytes] = []
+    if not data:
+        return tokens
+
+    index = 0
+    while index < len(data):
+        item = data[index]
+        if isinstance(item, tuple):
+            parts = [_to_bytes(part) for part in item if isinstance(part, (bytes, str))]
+            part_index = 0
+            while part_index < len(parts):
+                token = parts[part_index]
+                tokens.append(token)
+                if _LITERAL_RE.search(token) and part_index + 1 < len(parts):
+                    tokens.append(parts[part_index + 1])
+                    part_index += 2
+                else:
+                    part_index += 1
+            index += 1
+            continue
+
+        if isinstance(item, (bytes, str)):
+            token = _to_bytes(item)
+            tokens.append(token)
+            if _LITERAL_RE.search(token) and index + 1 < len(data):
+                next_item = data[index + 1]
+                if isinstance(next_item, (bytes, str)):
+                    tokens.append(_to_bytes(next_item))
+                    index += 1
+
+        index += 1
+    return tokens
 
 
 def _parse_list_line(line: str) -> MailboxInfo | None:
@@ -359,22 +350,23 @@ def _quote_imap_string(value: str) -> str:
 
 
 def build_search_cursor(
-    mailbox: str,
+    state: SearchCursorState,
     *,
-    uid: int | None = None,
-    query_hash: str,
-    signing_key: str | None = None,
+    signing_key: bytes,
 ) -> str:
-    if not (signing_key or get_settings().cursor_signing_key):
-        raise ValueError("CURSOR_SIGNING_KEY fehlt")
-
-    payload = {"v": 2, "mailbox": mailbox, "q": query_hash}
-    if uid is not None:
-        payload["uid"] = uid
+    if not isinstance(signing_key, (bytes, bytearray)):
+        raise ValueError("signing_key muss Bytes sein.")
+    if len(bytes(signing_key)) < 32:
+        raise ValueError("signing_key muss mindestens 32 Bytes haben.")
+    payload = {
+        "v": state.version,
+        "mailbox_index": state.mailbox_index,
+        "mailbox": state.mailbox,
+        "before_uid": state.before_uid,
+        "q": state.query_hash,
+    }
     payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    signing = signing_key or get_settings().cursor_signing_key
-    secret = signing.encode("utf-8", errors="replace")
-    signature = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
+    signature = hmac.new(bytes(signing_key), payload_bytes, hashlib.sha256).digest()
     token = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
     sig = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
     return f"{token}.{sig}"
@@ -387,12 +379,11 @@ def _b64url_decode(payload: str) -> bytes:
 def parse_search_cursor(
     cursor: str | None,
     *,
-    expected_query_hash: str | None = None,
+    expected_query_hash: str,
+    signing_key: bytes,
+    expected_mailbox_count: int | None = None,
     expected_mailbox: str | None = None,
-    signing_key: str | None = None,
-) -> tuple[str, int | None]:
-    if not (signing_key or get_settings().cursor_signing_key):
-        raise ValueError("CURSOR_SIGNING_KEY fehlt")
+) -> SearchCursorState:
 
     if not cursor:
         raise InvalidSearchParameterError("Cursor fehlt")
@@ -400,6 +391,12 @@ def parse_search_cursor(
     parts = cursor.split(".")
     if len(parts) != 2:
         raise InvalidSearchParameterError("Ungültiger Cursor")
+
+    key = bytes(signing_key) if isinstance(signing_key, (bytes, bytearray)) else None
+    if key is None:
+        raise InvalidSearchParameterError("Ungültiger Cursor-Signaturschlüssel")
+    if len(key) < 32:
+        raise InvalidSearchParameterError("Ungültiger Cursor-Signaturschlüssel")
 
     payload_raw, signature_raw = parts
     try:
@@ -415,7 +412,11 @@ def parse_search_cursor(
     if not isinstance(payload, dict):
         raise InvalidSearchParameterError("Ungültiger Cursor")
 
-    if payload.get("v") != 2:
+    if payload.get("v") != 3:
+        raise InvalidSearchParameterError("Ungültiger Cursor")
+
+    mailbox_index = payload.get("mailbox_index")
+    if not isinstance(mailbox_index, int) or mailbox_index < 0:
         raise InvalidSearchParameterError("Ungültiger Cursor")
 
     mailbox = payload.get("mailbox")
@@ -424,7 +425,10 @@ def parse_search_cursor(
     if expected_mailbox is not None and mailbox != expected_mailbox:
         raise InvalidSearchParameterError("Ungültiger Cursor")
 
-    if expected_query_hash is not None and payload.get("q") != expected_query_hash:
+    if expected_mailbox_count is not None and mailbox_index >= expected_mailbox_count:
+        raise InvalidSearchParameterError("Ungültiger Cursor")
+
+    if payload.get("q") != expected_query_hash:
         raise InvalidSearchParameterError("Cursor passt nicht zur aktuellen Suche")
 
     if payload.get("q") is None:
@@ -432,29 +436,43 @@ def parse_search_cursor(
 
     signature = _b64url_decode(signature_raw)
     expected = hmac.new(
-        (signing_key or get_settings().cursor_signing_key).encode("utf-8", errors="replace"),
+        key,
         payload_data,
         hashlib.sha256,
     ).digest()
     if not hmac.compare_digest(signature, expected):
         raise InvalidSearchParameterError("Ungültiger Cursor")
 
-    uid = payload.get("uid")
-    if uid is None:
-        return mailbox, None
-    if not isinstance(uid, int):
-        raise InvalidSearchParameterError("Ungültiger Cursor")
-    if uid < 0:
+    before_uid = payload.get("before_uid")
+    if before_uid is None:
+        before_uid_value: int | None = None
+    elif not isinstance(before_uid, int) or before_uid < 1:
         raise InvalidSearchParameterError("Ungültiger Cursor")
 
-    return mailbox, uid
+    else:
+        before_uid_value = before_uid
+
+    return SearchCursorState(
+        version=3,
+        mailbox_index=mailbox_index,
+        mailbox=mailbox,
+        before_uid=before_uid_value,
+        query_hash=expected_query_hash,
+    )
 
 
-def _needs_utf8_criteria(criteria: list[str]) -> bool:
-    return any(any(ord(ch) > 127 for ch in token) for token in criteria if isinstance(token, str))
+def _needs_utf8_criteria(criteria: list[str | bytes]) -> bool:
+    for token in criteria:
+        if isinstance(token, str):
+            if any(ord(ch) > 127 for ch in token):
+                return True
+            continue
+        if isinstance(token, bytes) and any(byte > 127 for byte in token):
+            return True
+    return False
 
 
-def _build_uid_search_query(criteria: list[str]) -> tuple[str, ...]:
+def _build_uid_search_query(criteria: list[str]) -> tuple[str | bytes, ...]:
     normalized = tuple(criteria) if criteria else ("ALL",)
     if normalized == ("ALL",):
         return normalized
@@ -541,29 +559,66 @@ class ImapClient:
                     logger.debug("IMAP keepalive NOOP success")
                     return
 
-                if self.settings.imap_ssl:
-                    context = ssl.create_default_context()
-                    context.check_hostname = True
-                    context.verify_mode = ssl.CERT_REQUIRED
+                port = self.settings.imap_port
+                if self.settings.imap_tls_mode == "starttls" and port == 993:
+                    port = 143
+
+                context = ssl.create_default_context()
+                context.check_hostname = True
+                context.verify_mode = ssl.CERT_REQUIRED
+
+                if self.settings.imap_tls_mode == "ssl":
                     self._imap = imaplib.IMAP4_SSL(
-                        host=self.settings.imap_host,
-                        port=self.settings.imap_port,
+                        self.settings.imap_host,
+                        port,
                         timeout=self.settings.imap_connection_timeout,
                         ssl_context=context,
                     )
-                else:
+                elif self.settings.imap_tls_mode == "starttls":
                     self._imap = imaplib.IMAP4(
-                        host=self.settings.imap_host,
-                        port=self.settings.imap_port,
+                        self.settings.imap_host,
+                        port,
                         timeout=self.settings.imap_connection_timeout,
                     )
+                    typ, capabilities = self._imap.capability()
+                    if typ != "OK":
+                        raise ImapProtocolError("IMAP CAPABILITY fehlgeschlagen")
+                    combined = b" ".join(capabilities or [])
+                    if b"STARTTLS" not in combined.upper():
+                        raise ImapProtocolError("STARTTLS wird vom Server nicht unterstützt")
+                    if not hasattr(self._imap, "starttls"):
+                        raise ImapProtocolError("STARTTLS wird vom Server nicht unterstützt")
+                    typ, _ = self._imap.starttls(context)
+                    if typ != "OK":
+                        raise ImapProtocolError("STARTTLS konnte nicht durchgeführt werden")
+                    typ, _ = self._imap.capability()
+                    if typ != "OK":
+                        raise ImapProtocolError("IMAP CAPABILITY nach STARTTLS fehlgeschlagen")
 
                 password = self.settings.imap_password.get_secret_value()
-                typ, _response = self._imap.login(self.settings.imap_username, password)
+                try:
+                    typ, _ = self._imap.login(self.settings.imap_username, password)
+                except _IMAP_ABORT:
+                    raise
+                except _IMAP_ERROR as exc:
+                    raise AuthenticationError("IMAP-Authentifizierung fehlgeschlagen") from exc
                 if typ != "OK":
                     raise AuthenticationError("IMAP-Authentifizierung fehlgeschlagen")
-                logger.info("IMAP login succeeded host=%s ssl=%s", self.settings.imap_host, self.settings.imap_ssl)
+                logger.info(
+                    "IMAP login succeeded host=%s tls=%s",
+                    self.settings.imap_host,
+                    self.settings.imap_tls_mode,
+                )
                 return
+            except _IMAP_ERROR as exc:
+                if "AUTHENTICATION" in str(exc).upper() or "LOGIN" in str(exc).upper():
+                    raise AuthenticationError("IMAP-Authentifizierung fehlgeschlagen") from exc
+                last_error = exc
+                self._close()
+                if attempt < self.settings.imap_connection_retries and self._is_retryable_connect_error(exc):
+                    time.sleep(self.settings.imap_retry_delay)
+                    continue
+                raise ImapProtocolError("IMAP-Protokollfehler") from last_error
             except Exception as exc:
                 last_error = exc
                 self._close()
@@ -574,19 +629,17 @@ class ImapClient:
                 if isinstance(exc, AuthenticationError):
                     raise
                 if self._is_protocol_error(exc):
-                    raise ImapProtocolError(
-                        "IMAP-Protokollfehler: AUTH fehlgeschlagen oder Befehl abgelehnt"
-                    ) from last_error
+                    raise ImapProtocolError("IMAP-Protokollfehler") from last_error
                 raise ImapConnectionError("IMAP-Verbindung fehlgeschlagen") from last_error
 
     def _is_retryable_connect_error(self, error: Exception) -> bool:
-        if isinstance(error, (imaplib.IMAP4.abort, TimeoutError, OSError)):
+        if isinstance(error, (_IMAP_ABORT, TimeoutError, OSError)):
             return True
         message = str(error).upper()
         return any(token in message for token in ("CONNECTION", "TIMEOUT", "EOF", "BYE"))
 
     def _is_protocol_error(self, error: Exception) -> bool:
-        if isinstance(error, imaplib.IMAP4.error):
+        if isinstance(error, _IMAP_ERROR):
             message = str(error).upper()
             return any(
                 token in message
@@ -612,9 +665,9 @@ class ImapClient:
 
     def _classify_error(self, error: Exception) -> RetryCause:
         message = str(error).upper()
-        if isinstance(error, (TimeoutError, OSError, imaplib.IMAP4.abort)):
+        if isinstance(error, (TimeoutError, OSError, _IMAP_ABORT)):
             return RetryCause.RETRYABLE
-        if isinstance(error, imaplib.IMAP4.error) and "BYE" in message:
+        if isinstance(error, _IMAP_ERROR) and "BYE" in message:
             return RetryCause.RETRYABLE
         if "CONNECTION" in message or "TIMEOUT" in message or "EOF" in message:
             return RetryCause.RETRYABLE
@@ -646,7 +699,18 @@ class ImapClient:
                     self._select_mailbox_no_retry(mailbox)
 
                 return action(self._imap)
-            except (TimeoutError, OSError, imaplib.IMAP4.abort) as exc:
+            except (
+                AuthenticationError,
+                ImapProtocolError,
+                MailboxNotFoundError,
+                MessageNotFoundError,
+                AttachmentNotFoundError,
+                AttachmentTooLargeError,
+                MessageTooLargeError,
+                InvalidSearchParameterError,
+            ):
+                raise
+            except (TimeoutError, OSError, _IMAP_ABORT) as exc:
                 last_error = exc
                 cause = self._classify_error(exc)
                 if cause is RetryCause.RETRYABLE and attempt < self.settings.imap_connection_retries:
@@ -654,12 +718,13 @@ class ImapClient:
                     time.sleep(self.settings.imap_retry_delay)
                     continue
                 raise ImapConnectionError("IMAP-Befehl fehlgeschlagen") from last_error
-            except imaplib.IMAP4.error as exc:
+            except _IMAP_ERROR as exc:
                 last_error = exc
-                if (
+                should_retry = (
                     self._classify_error(exc) is RetryCause.RETRYABLE
                     and attempt < self.settings.imap_connection_retries
-                ):
+                )
+                if should_retry:
                     self._close()
                     time.sleep(self.settings.imap_retry_delay)
                     continue
@@ -693,7 +758,7 @@ class ImapClient:
             return
         if not mailbox:
             raise MailboxNotFoundError("Mailbox darf nicht leer sein")
-        self._run(lambda _client: self._select_mailbox_no_retry(mailbox), mailbox=mailbox)
+        self._run(lambda _client: None, mailbox=mailbox)
 
     def search_uids(
         self,
@@ -708,7 +773,9 @@ class ImapClient:
 
         self.ensure_mailbox(mailbox)
 
-        if before_uid is not None and before_uid > 0:
+        if before_uid is not None:
+            if before_uid < 1:
+                raise InvalidSearchParameterError("before_uid muss >= 1 sein")
             criteria = [*criteria, "UID", f"1:{before_uid}"]
 
         if not criteria:
@@ -726,7 +793,7 @@ class ImapClient:
                 return [], None
 
             selected = uids[:limit]
-            next_before_uid = selected[-1] - 1 if selected else None
+            next_before_uid = selected[-1] - 1 if selected and len(uids) > limit and selected[-1] > 1 else None
             return selected, next_before_uid
 
         return self._run(action, mailbox=mailbox)
@@ -745,15 +812,43 @@ class ImapClient:
 
         def action(client: imaplib.IMAP4 | imaplib.IMAP4_SSL) -> tuple[bytes | None, str | None]:
             typ, data = client.uid("FETCH", str(uid), query)
-            if typ != "OK":
+            if typ == "NO":
                 raise MessageNotFoundError(f"Nachricht {uid} nicht gefunden")
-            metadata = extract_fetch_metadata(data or [])
+            if typ != "OK":
+                raise ImapProtocolError(f"IMAP FETCH fehlgeschlagen: {query}")
             payload: bytes | None = extract_fetch_literal(data or []) if expect_literal else None
             if expect_literal and payload is None:
                 raise MessageNotFoundError(f"Nachricht {uid} ist leer")
-            return payload, extract_internal_date(metadata)
+            return payload, extract_internal_date(data or [])
 
         return self._run(action, mailbox=mailbox)
+
+    def fetch_message_size(self, mailbox: str, uid: int) -> int:
+        if uid <= 0:
+            raise InvalidSearchParameterError("Ungültige UID")
+
+        def action(client: imaplib.IMAP4 | imaplib.IMAP4_SSL) -> int:
+            typ, data = client.uid("FETCH", str(uid), "(RFC822.SIZE)")
+            if typ == "NO":
+                raise MessageNotFoundError(f"Nachricht {uid} nicht gefunden")
+            if typ != "OK":
+                raise ImapProtocolError("IMAP RFC822.SIZE fehlgeschlagen")
+            joined = b" ".join(_iter_fetch_tokens(data or []))
+            match = re.search(rb"RFC822\.SIZE\s+(\d+)", joined, flags=re.IGNORECASE)
+            if match is None:
+                raise ImapProtocolError("IMAP Rückgabe enthält keine RFC822.SIZE")
+            return int(match.group(1))
+
+        return self._run(action, mailbox=mailbox)
+
+    def assert_message_size_limit(self, mailbox: str, uid: int) -> int:
+        max_bytes = self.settings.max_message_size_mb * 1024 * 1024
+        size = self.fetch_message_size(mailbox, uid)
+        if size > max_bytes:
+            raise MessageTooLargeError(
+                f"Nachricht {uid} überschreitet die Konfigurationsgrenze von {self.settings.max_message_size_mb} MB"
+            )
+        return size
 
     def fetch_headers(self, mailbox: str, uid: int, *, include_all_headers: bool = False) -> tuple[bytes, str | None]:
         fields = "HEADER" if include_all_headers else "HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID)"
@@ -787,8 +882,10 @@ class ImapClient:
     def fetch_bodystructure(self, mailbox: str, uid: int) -> tuple[str, str | None]:
         def action(client: imaplib.IMAP4 | imaplib.IMAP4_SSL) -> tuple[str, str | None]:
             typ, data = client.uid("FETCH", str(uid), "(BODYSTRUCTURE INTERNALDATE)")
-            if typ != "OK":
+            if typ == "NO":
                 raise MessageNotFoundError(f"Nachricht {uid} hat keine BODYSTRUCTURE")
+            if typ != "OK":
+                raise ImapProtocolError("IMAP BODYSTRUCTURE fehlgeschlagen")
             metadata = extract_bodystructure_from_fetch(data or [])
             if metadata is None:
                 raise MessageNotFoundError(f"Nachricht {uid} hat keine BODYSTRUCTURE")
@@ -840,6 +937,7 @@ class ImapClient:
 
 __all__ = [
     "ImapClient",
+    "SearchCursorState",
     "_build_uid_search_query",
     "_format_imap_date",
     "_next_day",

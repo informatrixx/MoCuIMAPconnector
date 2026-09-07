@@ -43,6 +43,9 @@ class _MockImap:
         return "OK", [b""]
 
 
+_TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+
 def test_reconnect_reselects_mailbox_after_abort() -> None:
     settings = Settings(
         imap_host="test",
@@ -50,6 +53,7 @@ def test_reconnect_reselects_mailbox_after_abort() -> None:
         imap_username="user",
         imap_password="pass",
         imap_connection_retries=2,
+        cursor_signing_key=_TEST_KEY,
     )
     client = ImapClient(settings)
     fake = _MockImap()
@@ -72,7 +76,13 @@ def test_uid_search_passes_charset_for_utf8_query() -> None:
             super().__init__()
             self.uid_calls = []
 
-    settings = Settings(imap_host="test", imap_port=993, imap_username="user", imap_password="pass")
+    settings = Settings(
+        imap_host="test",
+        imap_port=993,
+        imap_username="user",
+        imap_password="pass",
+        cursor_signing_key=_TEST_KEY,
+    )
     client = ImapClient(settings)
     fake = _SearchMock()
     client._imap = fake

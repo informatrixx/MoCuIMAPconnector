@@ -38,7 +38,7 @@ _IMAP_ERROR = imaplib.IMAP4.error
 _IMAP_ABORT = imaplib.IMAP4.abort
 
 
-_LITERAL_RE = re.compile(rb"\{(\d+)\}\s*$")
+_LITERAL_RE = re.compile(rb"\{(\d+)\}")
 _INTERNAL_DATE_RE = re.compile(r"INTERNALDATE\s+\"([^\"]+)\"", flags=re.IGNORECASE)
 _INVALID_SEARCH_CHARS = re.compile(r"[\x00\r\n]")
 _R = TypeVar("_R")
@@ -64,6 +64,18 @@ class SearchCursorState:
     query_hash: str
 
 
+@dataclass(frozen=True)
+class FetchLiteral:
+    marker: bytes
+    data: bytes
+
+
+@dataclass(frozen=True)
+class FetchResponse:
+    metadata_parts: list[bytes]
+    literals: list[FetchLiteral]
+
+
 def _as_text(data: bytes | str) -> str:
     return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
 
@@ -78,6 +90,35 @@ def _to_bytes(data: bytes | str) -> bytes:
 
 def _to_imap_arg(value: str | bytes) -> bytes:
     return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
+def _find_unquoted_literal_marker(data: bytes, start: int) -> re.Match[bytes] | None:
+    """Find an IMAP literal marker while respecting quoted IMAP strings."""
+    in_quote = False
+    escaped = False
+    cursor = start
+    while cursor < len(data):
+        char = data[cursor]
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif char == 0x5C:  # backslash
+                escaped = True
+            elif char == 0x22:  # quote
+                in_quote = False
+            cursor += 1
+            continue
+
+        if char == 0x22:  # quote
+            in_quote = True
+            cursor += 1
+            continue
+        if char == 0x7B:  # {
+            match = _LITERAL_RE.match(data, cursor)
+            if match is not None:
+                return match
+        cursor += 1
+    return None
 
 
 def _decode_modified_utf7(value: str) -> str:
@@ -166,125 +207,232 @@ def encode_mailbox_name(value: str) -> str:
         return value
 
 
+def parse_fetch_response(data: list[Any]) -> FetchResponse:
+    """Split a low-level IMAP FETCH response in metadata and literal payloads."""
+    metadata: list[bytes] = []
+    literals: list[FetchLiteral] = []
+
+    if not data:
+        return FetchResponse(metadata_parts=metadata, literals=literals)
+
+    parts: list[bytes] = []
+    for item in data:
+        if isinstance(item, tuple):
+            parts.extend([_to_bytes(part) for part in item if isinstance(part, (bytes, str))])
+        elif isinstance(item, (bytes, str)):
+            parts.append(_to_bytes(item))
+
+    index = 0
+    total_parts = len(parts)
+    while index < len(parts):
+        current = parts[index]
+        cursor = 0
+        if not current:
+            index += 1
+            continue
+
+        while cursor < len(current):
+            match = _find_unquoted_literal_marker(current, cursor)
+            if match is None:
+                metadata.append(current[cursor:])
+                break
+
+            match_start = match.start()
+            match_end = match.end()
+            metadata.append(current[cursor:match_start])
+            metadata.append(match.group(0))
+
+            size = int(match.group(1))
+            literal_start = match_end
+            if current[literal_start : literal_start + 2] == b"\r\n":
+                literal_start += 2
+
+            if literal_start + size <= len(current):
+                literals.append(FetchLiteral(match.group(0), current[literal_start : literal_start + size]))
+                cursor = literal_start + size
+                continue
+
+            if index + 1 >= total_parts:
+                metadata.append(current[match_end:])
+                cursor = len(current)
+                break
+
+            index += 1
+            literals.append(FetchLiteral(match.group(0), parts[index]))
+            cursor = len(current)
+
+        if cursor < len(current):
+            metadata.append(current[cursor:])
+        index += 1
+
+    metadata = [item for item in metadata if item not in {b"", b" ", b")", b" \r", b"\r", b"\n", b"\r\n"}]
+    return FetchResponse(metadata_parts=metadata, literals=literals)
+
+
 def extract_fetch_metadata(data: list[Any]) -> list[bytes]:
-    """Extract plain FETCH metadata blocks from imaplib response tuples."""
-    return [item for item in _iter_fetch_tokens(data) if item.strip() not in {b")", b""}]
+    """Extract plain FETCH metadata blocks (without literal payloads)."""
+    return parse_fetch_response(data).metadata_parts
 
 
 def extract_fetch_literals(data: list[Any]) -> list[bytes]:
     """Return all detected literal payload blocks from FETCH data."""
-    literals: list[bytes] = []
-    tokens = _iter_fetch_tokens(data)
-    for index, token in enumerate(tokens):
-        if not _LITERAL_RE.search(token):
-            continue
-        if index + 1 >= len(tokens):
-            continue
-        literal = tokens[index + 1]
-        expected_match = _LITERAL_RE.search(token)
-        expected = int(expected_match.group(1)) if expected_match else len(literal)
-        if expected != len(literal):
-            logger.debug(
-                "extract_fetch_literals size mismatch expected=%s actual=%s",
-                expected,
-                len(literal),
-            )
-        literals.append(literal)
-    return literals
+    return [entry.data for entry in parse_fetch_response(data).literals]
 
 
 def extract_fetch_literal(data: list[Any]) -> bytes | None:
-    literals = extract_fetch_literals(data)
+    literals = parse_fetch_response(data).literals
     if not literals:
         return None
-    return literals[0]
+    return literals[0].data
 
 
-def extract_bodystructure_from_fetch(data: list[Any]) -> str | None:
-    metadata = extract_fetch_metadata(data)
-    if not metadata:
+def _consume_fetch_structure_literal(
+    data: bytes,
+    start: int,
+    literals: list[FetchLiteral],
+) -> tuple[bytes, int]:
+    if start >= len(data) or data[start : start + 1] != b"{":
+        return b"{", start
+    match = _LITERAL_RE.match(data[start:])
+    if match is None:
+        return b"{", start + 1
+    expected = int(match.group(1))
+    end = start + match.end()
+    if data[end : end + 2] == b"\r\n":
+        end += 2
+
+    payload = b""
+    if literals:
+        literal_entry = literals.pop(0)
+        payload = literal_entry.data
+    else:
+        payload = b""
+    if expected != len(payload):
+        logger.debug(
+            "fetch bodystructure literal size mismatch expected=%s actual=%s marker=%s",
+            expected,
+            len(payload),
+            match.group(0),
+        )
+    return payload, end
+
+
+def _read_bodystructure_bytes(
+    source: bytes,
+    start: int,
+    literals: list[FetchLiteral],
+) -> bytes | None:
+    if start >= len(source):
+        return None
+    if source[start] != ord("("):
         return None
 
-    joined = b" ".join(metadata).decode("utf-8", errors="replace")
-    marker = re.search(r"bodystructure", joined, flags=re.IGNORECASE)
-    if marker is None:
-        return None
-
-    index = marker.end()
-    body = joined[index:]
-    bracket_start = body.find("(")
-    if bracket_start < 0:
-        return None
-    start = index + bracket_start
-    position = start
     depth = 0
     in_quote = False
     escaped = False
+    cursor = start
+    out = bytearray()
 
-    while position < len(joined):
-        char = joined[position]
+    while cursor < len(source):
+        char = source[cursor]
         if in_quote:
+            out.append(char)
             if escaped:
                 escaped = False
-            elif char == "\\":
+            elif char == 0x5C:  # backslash
                 escaped = True
-            elif char == "\"":
+            elif char == 0x22:
                 in_quote = False
-        else:
-            if char == "\"":
-                in_quote = True
-            elif char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return joined[start : position + 1].strip()
-        position += 1
+            cursor += 1
+            continue
+
+        if char == 0x22:  # quote
+            in_quote = True
+            out.append(char)
+            cursor += 1
+            continue
+
+        if char == 0x28:  # (
+            depth += 1
+            out.append(char)
+            cursor += 1
+            continue
+
+        if char == 0x29:  # )
+            out.append(char)
+            depth -= 1
+            if depth == 0:
+                return bytes(out)
+            cursor += 1
+            continue
+
+        if char == 0x7B:  # {
+            value, next_cursor = _consume_fetch_structure_literal(source, cursor, literals)
+            if next_cursor <= cursor:
+                return None
+            if next_cursor == cursor + 1 and value == b"{":
+                out.append(char)
+                cursor += 1
+                continue
+            # Keep literals syntactically intact. Inserting their bytes verbatim
+            # would make parentheses and quotes in a filename look like IMAP
+            # BODYSTRUCTURE syntax to the downstream tokenizer.
+            out.extend(b"{" + str(len(value)).encode("ascii") + b"}\r\n" + value)
+            cursor = next_cursor
+            continue
+
+        out.append(char)
+        cursor += 1
 
     return None
 
 
+def extract_bodystructure_bytes_from_fetch(data: list[Any]) -> bytes | None:
+    response = parse_fetch_response(data)
+    if not response.metadata_parts:
+        return None
+
+    joined = b" ".join(response.metadata_parts)
+    marker_match = re.search(rb"\bBODYSTRUCTURE\b", joined, flags=re.IGNORECASE)
+    if marker_match is None:
+        return None
+
+    cursor = marker_match.end()
+    while cursor < len(joined) and chr(joined[cursor]).isspace():
+        cursor += 1
+    if cursor >= len(joined):
+        return None
+
+    if joined[cursor] == ord("{"):
+        literals = response.literals.copy()
+        body, next_cursor = _consume_fetch_structure_literal(joined, cursor, literals)
+        if not body and not next_cursor:
+            return None
+        return body
+
+    if joined[cursor] != ord("("):
+        return None
+
+    literals = response.literals.copy()
+    return _read_bodystructure_bytes(joined, cursor, literals)
+
+
+def extract_bodystructure_from_fetch(data: list[Any]) -> str | None:
+    body_bytes = extract_bodystructure_bytes_from_fetch(data)
+    if body_bytes is None:
+        return None
+    return body_bytes.decode("utf-8", errors="replace")
+
+
 def extract_internal_date(data: list[Any]) -> str | None:
-    joined = b" ".join(_iter_fetch_tokens(data))
+    metadata = parse_fetch_response(data).metadata_parts
+    if not metadata:
+        return None
+    joined = b" ".join(metadata)
     match = _INTERNAL_DATE_RE.search(_safe_text_decode(joined))
     if match:
         return parse_internal_imap_date(match.group(1))
     return None
-
-
-def _iter_fetch_tokens(data: list[Any]) -> list[bytes]:
-    tokens: list[bytes] = []
-    if not data:
-        return tokens
-
-    index = 0
-    while index < len(data):
-        item = data[index]
-        if isinstance(item, tuple):
-            parts = [_to_bytes(part) for part in item if isinstance(part, (bytes, str))]
-            part_index = 0
-            while part_index < len(parts):
-                token = parts[part_index]
-                tokens.append(token)
-                if _LITERAL_RE.search(token) and part_index + 1 < len(parts):
-                    tokens.append(parts[part_index + 1])
-                    part_index += 2
-                else:
-                    part_index += 1
-            index += 1
-            continue
-
-        if isinstance(item, (bytes, str)):
-            token = _to_bytes(item)
-            tokens.append(token)
-            if _LITERAL_RE.search(token) and index + 1 < len(data):
-                next_item = data[index + 1]
-                if isinstance(next_item, (bytes, str)):
-                    tokens.append(_to_bytes(next_item))
-                    index += 1
-
-        index += 1
-    return tokens
 
 
 def _parse_list_line(line: str) -> MailboxInfo | None:
@@ -833,7 +981,7 @@ class ImapClient:
                 raise MessageNotFoundError(f"Nachricht {uid} nicht gefunden")
             if typ != "OK":
                 raise ImapProtocolError("IMAP RFC822.SIZE fehlgeschlagen")
-            joined = b" ".join(_iter_fetch_tokens(data or []))
+            joined = b" ".join(extract_fetch_metadata(data or []))
             match = re.search(rb"RFC822\.SIZE\s+(\d+)", joined, flags=re.IGNORECASE)
             if match is None:
                 raise ImapProtocolError("IMAP Rückgabe enthält keine RFC822.SIZE")
@@ -945,11 +1093,13 @@ __all__ = [
     "build_search_cursor",
     "decode_mailbox_name",
     "encode_mailbox_name",
+    "extract_bodystructure_bytes_from_fetch",
     "extract_bodystructure_from_fetch",
     "extract_fetch_literal",
     "extract_fetch_literals",
     "extract_fetch_metadata",
     "extract_internal_date",
+    "parse_fetch_response",
     "parse_search_criteria",
     "parse_search_cursor",
 ]

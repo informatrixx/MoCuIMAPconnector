@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import AliasChoices, Field, SecretStr, field_serializer, field_validator, model_validator
@@ -37,6 +36,7 @@ class Settings(BaseSettings):
         env_prefix="",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     imap_host: str = "imap.gmx.net"
@@ -50,7 +50,11 @@ class Settings(BaseSettings):
     imap_password: SecretStr = SecretStr("")
     cursor_signing_key: SecretStr = Field(
         default=SecretStr(""),
-        validation_alias=AliasChoices("CURSOR_SIGNING_KEY_HEX", "CURSOR_SIGNING_KEY"),
+        validation_alias=AliasChoices(
+            "cursor_signing_key",
+            "CURSOR_SIGNING_KEY_HEX",
+            "CURSOR_SIGNING_KEY",
+        ),
     )
 
     mcp_bind: str = "127.0.0.1"
@@ -103,8 +107,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CURSOR_SIGNING_KEY_HEX muss gesetzt und sicher geheim gehalten werden."
             )
-        if not raw:
-            raise ValueError("CURSOR_SIGNING_KEY_HEX muss gesetzt und sicher geheim gehalten werden.")
 
         if re.fullmatch(r"[0-9a-fA-F]{64}", raw):
             return value
@@ -161,7 +163,6 @@ def get_settings() -> Settings:
     return settings
 
 
-@dataclass(frozen=True)
 class CursorSigningKeyError(ValueError):
     """Raised if the cursor signing key cannot be decoded."""
 

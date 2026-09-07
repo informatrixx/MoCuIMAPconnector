@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -22,8 +23,20 @@ from ..security import PROMPT_INJECTION_WARNING, InvalidSearchParameterError
 
 
 def canonicalize_mailboxes(mailboxes: list[str] | None) -> list[str]:
-    normalized = [mailbox for mailbox in mailboxes or [] if mailbox and mailbox.strip()]
-    unique = list(dict.fromkeys([mailbox.strip() for mailbox in normalized]))
+    if mailboxes is None:
+        return []
+
+    normalized: list[str] = []
+    for mailbox in mailboxes:
+        if not mailbox:
+            raise InvalidSearchParameterError("Mailbox darf nicht leer sein.")
+        if mailbox.strip() == "":
+            raise InvalidSearchParameterError("Mailbox darf nicht nur aus Leerzeichen bestehen.")
+        if re.search(r"[\x00\r\n]", mailbox):
+            raise InvalidSearchParameterError("Mailbox enthält ungültige Steuerzeichen.")
+        normalized.append(mailbox)
+
+    unique = list(dict.fromkeys(normalized))
     unique.sort()
     return unique
 

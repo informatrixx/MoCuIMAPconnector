@@ -1,6 +1,6 @@
 # MoCu IMAP Connector
 
-Produktionsfähiger, read-only MCP-Server für den kontrollierten Zugriff auf ein GMX-IMAP-Postfach.
+Production-oriented, read-only MCP-Server für den kontrollierten Zugriff auf ein GMX-IMAP-Postfach.
 
 - **Read-only**: Es werden nur Mails gelesen. Es werden keine Mails gelöscht, verschoben, markiert, versendet oder in andere Ordner geschrieben.
 - **MCP-Server**: Streamable-HTTP (MCP-Python-SDK, aktuelle Version im Projekt).
@@ -130,6 +130,11 @@ Unit-Tests decken u. a. ab:
 - Datumsbereich für IMAP (`SINCE`/`BEFORE`)
 - UID-/Cursor-Mechanik
 - Geheimnis-Redaktion in Settings/Exceptions/Logs
+
+Hinweis:
+
+- Diese Implementierung ist parser- und protocol-technisch für den produktiven Betrieb vorbereitet.
+- Ein echter Live-IMAP-Provider-Test (GMX) ist vor produktivem Rollout zusätzlich erforderlich.
 
 CI-Workflow:
 

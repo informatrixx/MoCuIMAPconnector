@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import imaplib
 
+import pytest
+
 from mocu_imap_mcp.config import Settings
 from mocu_imap_mcp.imap_client import ImapClient
 from mocu_imap_mcp.security import AuthenticationError, ImapConnectionError
@@ -116,3 +118,138 @@ def test_timeout_during_login_becomes_connection_error() -> None:
         raise AssertionError("ImapConnectionError wurde nicht ausgelöst")
     finally:
         module.imaplib.IMAP4_SSL = original_imap4_ssl  # type: ignore[assignment]
+
+
+def test_starttls_without_capability_never_logs_in() -> None:
+    calls: list[str] = []
+
+    class _FakeImap:
+        def __init__(self, _host: str, port: int, timeout: int, **_kwargs: object) -> None:
+            calls.append(f"connect:{port}:{timeout}")
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            calls.append("capability")
+            return "OK", [b"IMAP4rev1"]
+
+        def login(self, _user: str, _password: str) -> tuple[str, list[bytes]]:
+            calls.append("login")
+            return "OK", [b""]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            calls.append("logout")
+            return "OK", [b""]
+
+    module = __import__("mocu_imap_mcp.imap_client", fromlist=["imaplib"])
+    original_imap4 = module.imaplib.IMAP4
+    try:
+        module.imaplib.IMAP4 = _FakeImap  # type: ignore[assignment]
+        settings = Settings(
+            imap_host="imap.example",
+            imap_port=143,
+            imap_username="user",
+            imap_password="password",
+            imap_tls_mode="starttls",
+            cursor_signing_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        with pytest.raises(ImapConnectionError):
+            ImapClient(settings).connect()
+    finally:
+        module.imaplib.IMAP4 = original_imap4  # type: ignore[assignment]
+
+    assert "starttls" not in calls
+    assert "login" not in calls
+    assert calls[0].startswith("connect")
+
+
+def test_starttls_command_rejected_without_plain_login_fallback() -> None:
+    calls: list[str] = []
+
+    class _FakeImap:
+        def __init__(self, _host: str, port: int, timeout: int, **_kwargs: object) -> None:
+            calls.append("connect")
+            self.port = port
+            self.timeout = timeout
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            calls.append("capability")
+            return "OK", [b"IMAP4rev1 STARTTLS"]
+
+        def starttls(self, _context: object | None = None) -> tuple[str, list[bytes]]:
+            calls.append("starttls")
+            return "NO", [b""]
+
+        def login(self, _user: str, _password: str) -> tuple[str, list[bytes]]:
+            calls.append("login")
+            return "OK", [b""]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            calls.append("logout")
+            return "OK", [b""]
+
+    module = __import__("mocu_imap_mcp.imap_client", fromlist=["imaplib"])
+    original_imap4 = module.imaplib.IMAP4
+    try:
+        module.imaplib.IMAP4 = _FakeImap  # type: ignore[assignment]
+        settings = Settings(
+            imap_host="imap.example",
+            imap_port=143,
+            imap_username="user",
+            imap_password="password",
+            imap_tls_mode="starttls",
+            cursor_signing_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        with pytest.raises(ImapConnectionError):
+            ImapClient(settings).connect()
+    finally:
+        module.imaplib.IMAP4 = original_imap4  # type: ignore[assignment]
+
+    assert calls == ["connect", "capability", "starttls", "logout"]
+
+
+def test_starttls_failure_on_second_capability_blocks_plain_login() -> None:
+    calls: list[str] = []
+
+    class _FakeImap:
+        def __init__(self, _host: str, port: int, timeout: int, **_kwargs: object) -> None:
+            calls.append("connect")
+            self.port = port
+            self.timeout = timeout
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            capability_calls = sum(call.startswith("capability") for call in calls) + 1
+            calls.append(f"capability:{capability_calls}")
+            if capability_calls == 1:
+                return "OK", [b"IMAP4rev1 STARTTLS"]
+            return "NO", [b""]
+
+        def starttls(self, _context: object | None = None) -> tuple[str, list[bytes]]:
+            calls.append("starttls")
+            return "OK", [b""]
+
+        def login(self, _user: str, _password: str) -> tuple[str, list[bytes]]:
+            calls.append("login")
+            return "OK", [b""]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            calls.append("logout")
+            return "OK", [b""]
+
+    module = __import__("mocu_imap_mcp.imap_client", fromlist=["imaplib"])
+    original_imap4 = module.imaplib.IMAP4
+    try:
+        module.imaplib.IMAP4 = _FakeImap  # type: ignore[assignment]
+        settings = Settings(
+            imap_host="imap.example",
+            imap_port=143,
+            imap_username="user",
+            imap_password="password",
+            imap_tls_mode="starttls",
+            cursor_signing_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        with pytest.raises(ImapConnectionError):
+            ImapClient(settings).connect()
+    finally:
+        module.imaplib.IMAP4 = original_imap4  # type: ignore[assignment]
+
+    assert calls == ["connect", "capability:1", "starttls", "capability:2", "logout"]
+    assert "login" not in calls

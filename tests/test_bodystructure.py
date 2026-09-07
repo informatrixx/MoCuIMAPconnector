@@ -3,6 +3,11 @@ from __future__ import annotations
 from mocu_imap_mcp.bodystructure import iter_attachments_from_bodystructure
 
 
+def _literal(name: str) -> str:
+    encoded = name.encode("utf-8")
+    return f"{{{len(encoded)}}}{name}"
+
+
 def test_bodystructure_multipart_mixed_plain_and_pdf() -> None:
     raw = (
         '((("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 128 4) '
@@ -85,3 +90,55 @@ def test_bodystructure_case_insensitive_marker_and_literal_filename() -> None:
     items = iter_attachments_from_bodystructure(raw)
     assert any(item.inline for item in items)
     assert any(item.filename == "rechnung-datei.pdf" for item in items)
+
+
+def test_bodystructure_literal_filenames_preserve_special_characters() -> None:
+    names = [
+        "rechnung)2025.pdf",
+        'ma"rz.pdf',
+        "märz.pdf",
+        " invoice.pdf",
+        r"rechnung\\2025.pdf",
+        'rechn")ung.pdf',
+    ]
+    for name in names:
+        raw = (
+            f'((("APPLICATION" "PDF" ("NAME" {_literal(name)}) NIL NIL "BASE64" 2048 NIL '
+            f'("ATTACHMENT" ("FILENAME" {_literal(name)})) NIL) "MIXED"))'
+        )
+        items = iter_attachments_from_bodystructure(raw)
+        assert len(items) == 1
+        assert items[0].filename == name
+
+
+def test_bodystructure_multiple_literal_parameters() -> None:
+    raw_name = _literal("rechnung)2025.pdf")
+    disp_name = _literal("rechnung)2025.pdf")
+    raw = (
+        f'((("APPLICATION" "PDF" ("NAME" {raw_name}) NIL NIL "BASE64" 2048 NIL '
+        f'("ATTACHMENT" ("FILENAME" {disp_name})) NIL) "MIXED"))'
+    )
+    items = iter_attachments_from_bodystructure(raw)
+    assert len(items) == 1
+    assert items[0].filename == "rechnung)2025.pdf"
+
+
+def test_bodystructure_unicode_filename_uses_byte_length() -> None:
+    name = "rechnung-märz.pdf"
+    expected_len = len(name.encode("utf-8"))
+    raw = (
+        f'((("APPLICATION" "PDF" ("NAME" {{{expected_len}}}{name}) NIL NIL "BASE64" 2048 NIL '
+        f'("ATTACHMENT" ("FILENAME" {{{expected_len}}}{name})) NIL) "MIXED"))'
+    )
+    items = iter_attachments_from_bodystructure(raw)
+    assert items[0].filename == name
+
+
+def test_bodystructure_singlepart_root_part_id_is_one() -> None:
+    raw = (
+        '("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 1234 NIL'
+        ' ("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL)'
+    )
+    items = iter_attachments_from_bodystructure(raw)
+    assert len(items) == 1
+    assert items[0].part_id == "1"

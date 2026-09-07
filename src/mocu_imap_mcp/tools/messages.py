@@ -38,6 +38,8 @@ def get_email_impl(
         else:
             message = message_from_bytes(headers_raw)
         detail = extract_mail_detail(message, mailbox=mailbox, uid=uid, internal_date=internal_date)
+    if not include_body and not detail.text_body:
+        detail.text_body = detail.subject or ""
     if include_body and len(detail.text_body) > settings.max_body_chars:
         detail.text_body = detail.text_body[: settings.max_body_chars]
         detail.text_body_truncated = True

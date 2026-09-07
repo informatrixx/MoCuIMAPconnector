@@ -72,10 +72,37 @@ def _resource_prefix(content_type: str) -> str:
     return "octet"
 
 
-def _read_attachment(mailbox_token: str, uid: int, part_id: str, settings: Settings) -> bytes:
+def _read_attachment(
+    mailbox_token: str,
+    uid: int,
+    part_id: str,
+    settings: Settings,
+    *,
+    expected_prefix: str | None = None,
+) -> bytes:
     mailbox = urllib.parse.unquote(mailbox_token)
-    with ImapClient(settings) as client:
+    client = ImapClient(settings)
+    try:
+        attachment = next(
+            (
+                item
+                for item in client.list_attachments(mailbox, uid)
+                if item.part_id == part_id
+            ),
+            None,
+        )
+        if attachment is None:
+            raise ValueError(f"Attachment {part_id} wurde nicht gefunden")
+
+        if expected_prefix is not None:
+            actual_prefix = _resource_prefix(attachment.content_type or "application/octet-stream")
+            if expected_prefix != "octet" and actual_prefix != expected_prefix:
+                raise ValueError("Resource-MIME-Prefix passt nicht zum Attachment-Inhalt.")
         return client.read_attachment(mailbox, uid, part_id)
+    finally:
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
 
 
 def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
@@ -191,7 +218,13 @@ def register_attachment_tools(server: MCPServer, settings: Settings) -> None:
                 mime_type=_mime_type,
             )
             def _reader(mailbox_token: str, uid: int, part_id: str) -> bytes:
-                return _read_attachment(mailbox_token, uid, part_id, settings)
+                return _read_attachment(
+                    mailbox_token,
+                    uid,
+                    part_id,
+                    settings,
+                    expected_prefix=prefix,
+                )
 
             _reader.__name__ = f"read_attachment_resource_{prefix}"
             return _reader

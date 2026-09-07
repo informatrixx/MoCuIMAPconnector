@@ -12,6 +12,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+        dependency-set: ["latest", "minimum"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,7 +25,12 @@ jobs:
       - name: Install package
         run: |
           python -m pip install -U pip
-          python -m pip install -e ".[dev]"
+          if [ "${{ matrix.dependency-set }}" = "minimum" ]; then
+            python -m pip install "mcp==2.0.0" "pydantic==2.13.*" "pydantic-settings==2.15.*"
+            python -m pip install -e ".[dev]"
+          else
+            python -m pip install -e ".[dev]"
+          fi
 
       - name: Ruff
         run: python -m ruff check src tests scripts

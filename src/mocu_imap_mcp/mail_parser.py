@@ -47,7 +47,23 @@ def decode_filename(raw_filename: str | None) -> str:
         if decoded:
             return decoded
 
-    decoded = decode_header_value(raw_filename)
+    def _decode_without_strip(value: str) -> str:
+        parts = decode_header(value)
+        decoded_parts: list[str] = []
+        for part, encoding in parts:
+            if isinstance(part, bytes):
+                charset = encoding or "utf-8"
+                try:
+                    decoded_parts.append(part.decode(charset, errors="replace"))
+                except LookupError:
+                    decoded_parts.append(part.decode("utf-8", errors="replace"))
+                except UnicodeDecodeError:
+                    decoded_parts.append(part.decode("latin1", errors="replace"))
+            else:
+                decoded_parts.append(part)
+        return "".join(decoded_parts)
+
+    decoded = _decode_without_strip(raw_filename)
     if decoded and "%" in decoded:
         try:
             return unquote(decoded)
@@ -75,7 +91,7 @@ def decode_filename(raw_filename: str | None) -> str:
         except Exception:
             pass
 
-    return raw_filename.strip()
+    return raw_filename
 
 
 def parse_addresses(raw: str | None) -> list[MailAddress]:

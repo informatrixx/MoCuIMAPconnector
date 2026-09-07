@@ -76,3 +76,43 @@ def test_text_body_is_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
     result = get_email_impl(settings, "INBOX", 4711, include_body=True)
     assert result["text_body_truncated"] is True
     assert len(result["text_body"]) == 20
+
+
+def test_include_body_false_skips_size_check_and_full_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeImapClient(size=10 * 1024 * 1024)
+
+    settings = Settings(
+        imap_host="localhost",
+        imap_port=143,
+        imap_username="user",
+        imap_password="password",
+        imap_tls_mode="starttls",
+        cursor_signing_key=_TEST_KEY,
+    )
+    monkeypatch.setattr("mocu_imap_mcp.tools.messages.ImapClient", lambda _settings: fake_client)  # type: ignore[assignment]
+    result = get_email_impl(settings, "INBOX", 4711, include_body=False)
+    assert result["text_body"] == "Hallo"
+    assert result["text_body_truncated"] is False
+    assert fake_client.assert_calls == 0
+    assert fake_client.full_fetch_calls == 0
+
+
+def test_text_body_truncated_flag_false_for_small_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BigFake(_FakeImapClient):
+        def fetch_full_message(self, _mailbox: str, _uid: int) -> tuple[bytes, str | None]:
+            return b"k" * 10, "2025-03-01T00:00:00"
+
+    fake_client = _BigFake(size=10)
+    settings = Settings(
+        imap_host="localhost",
+        imap_port=143,
+        imap_username="user",
+        imap_password="password",
+        imap_tls_mode="starttls",
+        cursor_signing_key=_TEST_KEY,
+        max_body_chars=20,
+    )
+    monkeypatch.setattr("mocu_imap_mcp.tools.messages.ImapClient", lambda _settings: fake_client)  # type: ignore[assignment]
+    result = get_email_impl(settings, "INBOX", 4711, include_body=True)
+    assert result["text_body_truncated"] is False
+    assert len(result["text_body"]) == 10

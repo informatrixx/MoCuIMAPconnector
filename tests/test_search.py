@@ -16,6 +16,7 @@ from mocu_imap_mcp.security import InvalidSearchParameterError
 from mocu_imap_mcp.tools.search import (
     _build_search_hash,
     _scan_matching_messages,
+    canonicalize_mailboxes,
 )
 
 _TEST_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -64,6 +65,15 @@ class _FakeImapClient:
 def test_search_criteria_date_range_is_inclusive() -> None:
     criteria = parse_search_criteria(date_from="2025-01-01", date_to="2025-12-31")
     assert criteria == ["SINCE", "01-Jan-2025", "BEFORE", "01-Jan-2026"]
+
+
+def test_canonicalize_mailboxes_keeps_distinct_names_and_rejects_control_chars() -> None:
+    ordered = canonicalize_mailboxes([" INBOX", "INBOX", "INBOX", "  Archive"])
+    assert ordered == ["  Archive", " INBOX", "INBOX"]
+    with pytest.raises(InvalidSearchParameterError):
+        canonicalize_mailboxes(["", "INBOX"])
+    with pytest.raises(InvalidSearchParameterError):
+        canonicalize_mailboxes(["\nINBOX"])
 
 
 def test_next_day_and_imap_date_format() -> None:

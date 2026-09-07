@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+import mocu_imap_mcp.imap_client as imap_client_module
+from mocu_imap_mcp.config import Settings
 from mocu_imap_mcp.imap_client import (
     InvalidSearchParameterError,
     _build_uid_search_query,
@@ -10,6 +12,7 @@ from mocu_imap_mcp.imap_client import (
     extract_fetch_literal,
     extract_fetch_literals,
     extract_fetch_metadata,
+    extract_internal_date,
     parse_search_criteria,
 )
 
@@ -77,6 +80,83 @@ def test_extract_internal_date_reads_raw_internaldate() -> None:
     from mocu_imap_mcp.imap_client import extract_internal_date
 
     assert extract_internal_date(data) == "2000-01-01T00:00:00+00:00"
+
+
+def test_extract_internal_date_ignores_internaldate_in_header_body() -> None:
+    response = [
+        b'1 (UID 4711 BODY[HEADER] {53}',
+        b'Subject: INTERNALDATE "01-Jan-1999 00:00:00 +0000"\r\n\r\n',
+        b') INTERNALDATE "15-Mar-2025 11:30:00 +0100")',
+    ]
+    assert extract_internal_date(response) == "2025-03-15T11:30:00+01:00"
+
+
+def test_extract_bodystructure_from_fetch_ignores_bodystructure_marker_in_body_text() -> None:
+    response = [
+        b'1 (UID 4711 BODY[TEXT] {33}',
+        b'Body contains BODYSTRUCTURE keyword only',
+        b') INTERNALDATE "01-Jan-2025 00:00:00 +0000")',
+    ]
+    assert extract_bodystructure_from_fetch(response) is None
+
+
+def test_extract_fetch_response_multiple_literals() -> None:
+    response = [
+        b'1 (UID 4711 BODY[HEADER] {54}',
+        b'INTERNALDATE "01-Jan-1999 00:00:00 +0000"',
+        b' BODY[1] {4}',
+        b'ABCD',
+        b') INTERNALDATE "15-Mar-2025 11:30:00 +0100")',
+    ]
+    assert extract_fetch_literals(response) == [
+        b'INTERNALDATE "01-Jan-1999 00:00:00 +0000"',
+        b"ABCD",
+    ]
+    assert extract_internal_date(response) == "2025-03-15T11:30:00+01:00"
+    assert extract_fetch_literal(response) == b'INTERNALDATE "01-Jan-1999 00:00:00 +0000"'
+
+
+def test_search_query_uses_bytes_payload_for_utf8_criteria() -> None:
+    calls: list[tuple[object, ...]] = []
+    original_imap4_ssl = imap_client_module.imaplib.IMAP4_SSL
+
+    class _FakeImap:
+        def __init__(self, _host: str, _port: int, timeout: int, **_kwargs: object) -> None:
+            self.timeout = timeout
+
+        def login(self, _user: str, _password: str) -> tuple[str, list[bytes]]:
+            return "OK", []
+
+        def select(self, _mailbox: str, readonly: bool = True) -> tuple[str, list[bytes]]:
+            return "OK", []
+
+        def uid(self, _command: str, *args: object) -> tuple[str, list[bytes]]:
+            calls.append(tuple(args))
+            return "OK", [b"1 2 3"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "OK", []
+
+    try:
+        imap_client_module.imaplib.IMAP4_SSL = _FakeImap  # type: ignore[assignment]
+        client = imap_client_module.ImapClient(
+            Settings(
+                imap_host="imap.example",
+                imap_port=993,
+                imap_username="u",
+                imap_password="p",
+                cursor_signing_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+        )
+        client.search_uids("INBOX", ["FROM", _quote_imap_string("Rechnung März")], limit=1)
+    finally:
+        imap_client_module.imaplib.IMAP4_SSL = original_imap4_ssl  # type: ignore[assignment]
+
+    assert calls, "IMAP uid() wurde nicht aufgerufen"
+    query_args = calls[0]
+    assert all(isinstance(item, bytes) for item in query_args)
+    assert query_args[:3] == (b"CHARSET", b"UTF-8", b"FROM")
+    assert query_args[3] == '"Rechnung März"'.encode()
 
 
 def test_build_uid_search_query_allows_binary_payload() -> None:

@@ -4,8 +4,10 @@ import logging
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError
 
 from .config import Settings, get_settings
+from .security import sanitize_validation_error
 from .tools.attachments import register_attachment_tools
 from .tools.mailboxes import register_mailbox_tools
 from .tools.messages import register_message_tools
@@ -37,7 +39,11 @@ def create_server(settings: Settings | None = None) -> MCPServer:
 
 
 def run() -> None:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        logger.error("Ungültige Konfiguration: %s", sanitize_validation_error(exc))
+        raise
     _configure_logging(settings.log_level)
     transport_security = TransportSecuritySettings(
         allowed_hosts=_as_list(settings.mcp_allowed_hosts),

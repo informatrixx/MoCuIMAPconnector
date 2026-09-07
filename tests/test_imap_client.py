@@ -13,6 +13,7 @@ from mocu_imap_mcp.imap_client import (
     extract_fetch_literals,
     extract_fetch_metadata,
     extract_internal_date,
+    parse_fetch_response,
     parse_search_criteria,
 )
 
@@ -51,6 +52,13 @@ def test_extract_fetch_metadata_and_literals() -> None:
     literals = extract_fetch_literals(response)
     assert literals == [b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n"]
     assert extract_fetch_literal(response) == b"Subject: Rechnung 123\r\nFrom: billing@example.org\r\n\r\n"
+
+
+def test_parse_fetch_response_does_not_duplicate_plain_metadata() -> None:
+    parsed = parse_fetch_response([b"1 (UID 1 RFC822.SIZE 123)"])
+
+    assert parsed.metadata_parts == [b"1 (UID 1 RFC822.SIZE 123)"]
+    assert parsed.literals == []
 
 
 def test_extract_bodystructure_from_fetch() -> None:

@@ -119,6 +119,43 @@ def test_read_attachment_resource_prefix_validation(monkeypatch: pytest.MonkeyPa
     )
     assert result == b"Hello"
 
+    class _FakeClientPdf:
+        def list_attachments(self, _mailbox: str, _uid: int) -> list[AttachmentMeta]:
+            return [
+                AttachmentMeta(
+                    part_id="3",
+                    filename="rechnung.pdf",
+                    content_type="application/pdf",
+                    size=5,
+                    inline=False,
+                    transfer_encoding="BASE64",
+                )
+            ]
+
+        def read_attachment(self, _mailbox: str, _uid: int, _part_id: str) -> bytes:
+            return base64.b64decode(b"SGVsbG8=")
+
+    monkeypatch.setattr(
+        "mocu_imap_mcp.tools.attachments.ImapClient",
+        lambda _settings: _FakeClientPdf(),  # type: ignore[assignment]
+    )
+    result = _read_attachment(
+        "INBOX",
+        99,
+        "3",
+        Settings(imap_username="u", imap_password="p", cursor_signing_key=_TEST_KEY),
+        expected_prefix="pdf",
+    )
+    assert result == b"Hello"
+    with pytest.raises(ValueError, match="Resource-MIME-Prefix"):
+        _read_attachment(
+            "INBOX",
+            99,
+            "3",
+            Settings(imap_username="u", imap_password="p", cursor_signing_key=_TEST_KEY),
+            expected_prefix="octet",
+        )
+
     class _FakeClientUnknown:
         def list_attachments(self, _mailbox: str, _uid: int) -> list[AttachmentMeta]:
             return [

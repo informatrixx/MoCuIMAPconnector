@@ -96,7 +96,7 @@ def _read_attachment(
 
         if expected_prefix is not None:
             actual_prefix = _resource_prefix(attachment.content_type or "application/octet-stream")
-            if expected_prefix != "octet" and actual_prefix != expected_prefix:
+            if actual_prefix != expected_prefix:
                 raise ValueError("Resource-MIME-Prefix passt nicht zum Attachment-Inhalt.")
         return client.read_attachment(mailbox, uid, part_id)
     finally:

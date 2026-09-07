@@ -235,6 +235,7 @@ def parse_fetch_response(data: list[Any]) -> FetchResponse:
             match = _find_unquoted_literal_marker(current, cursor)
             if match is None:
                 metadata.append(current[cursor:])
+                cursor = len(current)
                 break
 
             match_start = match.start()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .bodystructure import parse_bodystructure
+from .bodystructure import attachment_from_node, parse_bodystructure
 from .imap_client import ImapClient
 from .mail_parser import extract_mail_detail, message_from_bytes
 from .models import AttachmentInfo
@@ -22,12 +22,8 @@ def text_parts(node: Any, prefix: str = "") -> list[tuple[str, str, int]]:
         return result
     if len(node) < 7 or str(node[0]).upper() != "TEXT" or str(node[1]).upper() not in {"PLAIN", "HTML"}:
         return []
-    # Named and explicitly attached text parts must never become display bodies.
-    if isinstance(node[2], list) and any(str(k).upper() in {"NAME", "FILENAME"} for k in node[2][::2]):
+    if attachment_from_node(node, prefix or "1") is not None:
         return []
-    for extension in node[8:]:
-        if isinstance(extension, list) and extension and str(extension[0]).upper() == "ATTACHMENT":
-            return []
     return [(prefix or "1", str(node[1]).upper(), int(node[6]))]
 
 

@@ -87,13 +87,16 @@ def test_search_wire_uses_bounded_uid_window() -> None:
     assert calls == [("SEARCH", (b"ALL", b"UID", b"49001:50000", b"UID", b"1:50000"))]
 
 
-def test_account_resource_real_sdk_read(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mailbox_name", ["INBOX", "Invoices%2025", "Invoices%2F2025", "Invoices%2520",
+                                         "Rechnungen März", "Archiv/Rechnungen 2025"])
+def test_account_resource_real_sdk_read(runtime: Runtime, monkeypatch: pytest.MonkeyPatch,
+                                        mailbox_name: str) -> None:
     account_id = add_account(runtime)
     reads = []
 
     class Client:
         def pin_mailbox(self, mailbox: str, uidvalidity: int) -> int:
-            assert mailbox == "INBOX" and uidvalidity == 123
+            assert mailbox == mailbox_name and uidvalidity == 123
             return 123
 
         def list_attachments(self, mailbox: str, uid: int) -> list[AttachmentMeta]:
@@ -113,7 +116,10 @@ def test_account_resource_real_sdk_read(runtime: Runtime, monkeypatch: pytest.Mo
     async def check() -> None:
         server = MCPServer("Fixture")
         register(server, runtime)
-        uri = f"mocu://attachment-pdf/{account_id}/INBOX/123/7/2"
+        result = await server.call_tool("get_attachment", {"account_id": account_id, "mailbox": mailbox_name,
+                                                           "uidvalidity": 123, "uid": 7, "part_id": "2"})
+        assert not result.is_error
+        uri = result.structured_content["uri"]
         contents = list(await server.read_resource(uri))
         assert contents[0].content == b"%PDF-fixture"
         assert contents[0].mime_type == "application/pdf"
@@ -126,3 +132,38 @@ def test_account_resource_real_sdk_read(runtime: Runtime, monkeypatch: pytest.Mo
         assert reads == ["2"]
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("normal_type", ["PLAIN", "HTML"])
+@pytest.mark.parametrize("file_part", [
+    '("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1 NIL ("INLINE" ("FILENAME" {8}\r\nnote.txt)))',
+    '("TEXT" "HTML" NIL NIL NIL "7BIT" 4 1 NIL ("INLINE" ("FILENAME" "note.html")))',
+    '("TEXT" "PLAIN" ("NAME" "note.txt") NIL NIL "7BIT" 4 1)',
+    '("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1 NIL ("ATTACHMENT" NIL))',
+])
+@pytest.mark.parametrize("include_body", [True, False])
+def test_named_inline_parts_are_metadata_only(normal_type: str, file_part: str, include_body: bool) -> None:
+    calls = []
+
+    class Client:
+        settings = Settings(cursor_signing_key="ab" * 32)
+
+        def fetch_headers(self, mailbox: str, uid: int) -> tuple[bytes, None]:
+            return b"Subject: fixture\r\n\r\n", None
+
+        def fetch_bodystructure(self, mailbox: str, uid: int) -> tuple[str, None]:
+            return f'(("TEXT" "{normal_type}" NIL NIL NIL "7BIT" 12 1){file_part} "MIXED")', None
+
+        def fetch_message_part_mime(self, mailbox: str, uid: int, part_id: str) -> bytes:
+            calls.append(("mime", part_id))
+            return f"Content-Type: text/{normal_type.lower()}\r\n\r\n".encode()
+
+        def fetch_message_part_body(self, mailbox: str, uid: int, part_id: str) -> bytes:
+            calls.append(("body", part_id))
+            return b"Hello" if normal_type == "PLAIN" else b"<p>Hello</p>"
+
+    result = read_email(Client(), "INBOX", 1, include_body)  # type: ignore[arg-type]
+    assert calls == ([("mime", "1"), ("body", "1")] if include_body else [])
+    assert result["text_body"] == ("Hello" if include_body else "")
+    assert len(result["attachments"]) == 1
+    assert result["attachments"][0]["part_id"] == "2"

@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
@@ -155,7 +155,8 @@ def register(server: MCPServer, runtime: Runtime) -> None:
         )
         @safe_resource
         def read_attachment(account_id: str, mailbox_token: str, uidvalidity: int, uid: int, part_id: str) -> bytes:
-            mailbox = unquote(mailbox_token)
+            # MCP's URI-template matcher already decoded this segment once.
+            mailbox = mailbox_token
             with runtime.client(account_id) as client:
                 client.pin_mailbox(mailbox, uidvalidity)
                 attachment = next((a for a in client.list_attachments(mailbox, uid) if a.part_id == part_id), None)

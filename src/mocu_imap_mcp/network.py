@@ -8,6 +8,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -27,7 +28,8 @@ def resolve(host: str, port: int, timeout: float) -> list[str]:
 
     def worker() -> None:
         try:
-            result.put(list({str(x[4][0]) for x in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}))
+            records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            result.put(list(dict.fromkeys(str(x[4][0]) for x in records)))
         except OSError:
             result.put(None)
         finally:
@@ -44,30 +46,42 @@ def resolve(host: str, port: int, timeout: float) -> list[str]:
 
 
 def connect_socket(host: str, port: int, timeout: float) -> socket.socket:
+    # One DNS/TCP budget per attempt. TLS and subsequent IMAP I/O use the
+    # restored regular timeout; outer connection retries remain independently bounded.
+    deadline = time.monotonic() + timeout
     try:
         host = host.encode("idna").decode("ascii")
     except UnicodeError:
         raise NetworkPolicyError("Ungueltiger IMAP-Hostname") from None
     if not re.fullmatch(r"[a-zA-Z0-9.:-]{1,253}", host):
         raise NetworkPolicyError("Ungueltiger IMAP-Hostname")
-    addresses = resolve(host, port, timeout)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("IMAP-Verbindungszeitlimit erreicht")
+    addresses = list(dict.fromkeys(resolve(host, port, remaining)))
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if not ip.is_global or ip.is_multicast or ip.is_reserved:
             raise NetworkPolicyError("IMAP-Ziel ist nicht oeffentlich erlaubt")
-    # A single pinned target per attempt bounds aggregate latency. Retrying invokes
-    # resolution and policy validation again; connect never re-resolves the hostname.
-    target = addresses[0]
-    sock = socket.socket(socket.AF_INET6 if ":" in target else socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(timeout)
-        sock.connect((target, port))
-        return sock
-    except OSError:
-        sock.close()
-        raise
+    for index, target in enumerate(addresses):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("IMAP-Verbindungszeitlimit erreicht")
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET6 if ":" in target else socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(remaining / (len(addresses) - index))
+            sock.connect((target, port))
+            if time.monotonic() >= deadline:
+                raise TimeoutError("IMAP-Verbindungszeitlimit erreicht")
+            sock.settimeout(timeout)
+            return sock
+        except OSError:
+            if sock is not None:
+                sock.close()
+    raise OSError("Keine gepruefte IMAP-Adresse erreichbar") from None
 
 
 class PinnedIMAP(imaplib.IMAP4):

@@ -1,0 +1,10 @@
+**
+!src/
+!src/mocu_imap_mcp/
+!src/mocu_imap_mcp/**
+!pyproject.toml
+!requirements.lock
+!README.md
+!Dockerfile
+**/__pycache__/
+**/*.pyc

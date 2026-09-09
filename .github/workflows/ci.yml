@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m pip install -U pip
           if [ "${{ matrix.dependency-set }}" = "minimum" ]; then
-            python -m pip install "mcp==2.0.0" "pydantic==2.13.*" "pydantic-settings==2.15.*"
+            python -m pip install "mcp==2.0.0" "pydantic==2.13.*" "pydantic-settings==2.15.*" "cryptography==46.0.0"
             python -m pip install -e ".[dev]"
           else
             python -m pip install -e ".[dev]"
@@ -42,6 +42,13 @@ jobs:
         run: python -m pytest
 
       - name: MCP smoke test
-        env:
-          CURSOR_SIGNING_KEY_HEX: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
         run: python scripts/test_mcp.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t mocu-imap:multi-account-review .
+      - name: Runtime smoke
+        run: python3 scripts/test_docker.py

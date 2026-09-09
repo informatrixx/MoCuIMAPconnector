@@ -1,31 +1,51 @@
+# Include inside nginx http {}, NOT an existing server {}.
 limit_req_zone $binary_remote_addr zone=mcp_api:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=mocu_setup:10m rate=5r/m;
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name imap-mcp.example.at;
-
     ssl_certificate /etc/letsencrypt/live/imap-mcp.example.at/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/imap-mcp.example.at/privkey.pem;
 
-    # optional reverse-proxy auth to avoid public anonymous access
-    # auth_basic "Protected MCP";
-    # auth_basic_user_file /etc/nginx/.htpasswd;
+    # SECURITY-TODO: integrate a verified auth gateway here.
+    # MCP: verify OAuth issuer, audience, expiry and scopes.
+    # Setup: require an authenticated administrative browser session.
+    # On success supply X-Mocu-Subject and X-Mocu-Role (reader/admin).
+    # This default denial prevents accidental public exposure.
+    location = /_mocu_verify {
+        internal;
+        return 403;
+    }
 
-    # Streamable-HTTP request sizing and timeout for MCP streaming
-    client_max_body_size 4m;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-
-    # simple rate limiting
-    limit_req zone=mcp_api burst=20 nodelay;
-
-    location /mcp {
-        proxy_pass http://127.0.0.1:8765/mcp;
-        proxy_buffering off;
-        proxy_http_version 1.1;
+    location / {
+        auth_request /_mocu_verify;
+        auth_request_set $mocu_subject $upstream_http_x_mocu_subject;
+        auth_request_set $mocu_role $upstream_http_x_mocu_role;
+        proxy_set_header X-Mocu-Subject $mocu_subject;
+        proxy_set_header X-Mocu-Role $mocu_role;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        client_max_body_size 4m;
+        limit_req zone=mcp_api burst=20 nodelay;
+    }
+
+    location /setup/ {
+        auth_request /_mocu_verify;
+        auth_request_set $setup_subject $upstream_http_x_mocu_subject;
+        auth_request_set $setup_role $upstream_http_x_mocu_role;
+        proxy_set_header X-Mocu-Subject $setup_subject;
+        proxy_set_header X-Mocu-Role $setup_role;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:8765;
+        client_max_body_size 16k;
+        limit_req zone=mocu_setup burst=3 nodelay;
+        access_log off;
+        error_log /dev/null crit;
     }
 }

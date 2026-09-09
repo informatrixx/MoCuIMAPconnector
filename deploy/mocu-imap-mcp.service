@@ -9,6 +9,9 @@ Group=mocu-imap-mcp
 ExecStart=/opt/mocu-imap-mcp/.venv/bin/python -m mocu_imap_mcp.server
 WorkingDirectory=/opt/mocu-imap-mcp
 EnvironmentFile=/etc/mocu-imap-mcp.env
+StateDirectory=mocu-imap-mcp
+UMask=0077
+ReadWritePaths=/var/lib/mocu-imap-mcp
 Restart=on-failure
 RestartSec=5s
 

@@ -12,3 +12,8 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+secrets/
+*.sqlite3
+*.sqlite3-*
+*.key
+data/

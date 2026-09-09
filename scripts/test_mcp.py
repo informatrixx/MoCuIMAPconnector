@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import tempfile
+from pathlib import Path
 
-from mocu_imap_mcp.config import Settings
-from mocu_imap_mcp.server import create_server
+from mcp.server.mcpserver import MCPServer
 
-_SMOKE_CURSOR_KEY = "0" * 64
+from mocu_imap_mcp.multi_tools import register
+from mocu_imap_mcp.runtime import Runtime, RuntimeSettings
 
 
 async def main() -> None:
     # This script verifies registration only and must not require real IMAP
     # credentials or a production cursor key.
-    server = create_server(Settings(cursor_signing_key=_SMOKE_CURSOR_KEY))
+    with tempfile.TemporaryDirectory(prefix="mocu-smoke-") as directory:
+        root = Path(directory)
+        key = root / "synthetic.key"
+        key.write_bytes(base64.urlsafe_b64encode(bytes(range(32))))
+        runtime = Runtime(RuntimeSettings(database_path=root / "test.sqlite3", mocu_master_key_file=key))
+        server = MCPServer("MoCu IMAP Connector")
+        register(server, runtime)
+        await check(server)
+
+
+async def check(server: MCPServer) -> None:
     tools = [tool.name for tool in await server.list_tools()]
     resources = [resource.uri for resource in await server.list_resources()]
     templates = [template.uri_template for template in await server.list_resource_templates()]

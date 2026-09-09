@@ -687,8 +687,14 @@ def parse_search_criteria(
 
 
 class ImapClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *,
+                 connector: Callable[[str, str, int, int, ssl.SSLContext], imaplib.IMAP4] | None = None,
+                 credential_provider: Callable[[], str] | None = None) -> None:
         self.settings = settings
+        self._connector = connector
+        self._credential_provider = credential_provider
+        self._expected_validity: dict[str, int] = {}
+        self.uidvalidity: int | None = None
         self._imap: imaplib.IMAP4 | imaplib.IMAP4_SSL | None = None
         self._selected_mailbox: str | None = None
 
@@ -709,14 +715,17 @@ class ImapClient:
                     return
 
                 port = self.settings.imap_port
-                if self.settings.imap_tls_mode == "starttls" and port == 993:
+                if self._connector is None and self.settings.imap_tls_mode == "starttls" and port == 993:
                     port = 143
 
                 context = ssl.create_default_context()
                 context.check_hostname = True
                 context.verify_mode = ssl.CERT_REQUIRED
 
-                if self.settings.imap_tls_mode == "ssl":
+                if self._connector is not None:
+                    self._imap = self._connector(self.settings.imap_tls_mode, self.settings.imap_host,
+                                                 port, self.settings.imap_connection_timeout, context)
+                elif self.settings.imap_tls_mode == "ssl":
                     self._imap = imaplib.IMAP4_SSL(
                         self.settings.imap_host,
                         port,
@@ -729,6 +738,7 @@ class ImapClient:
                         port,
                         timeout=self.settings.imap_connection_timeout,
                     )
+                if self.settings.imap_tls_mode == "starttls":
                     typ, capabilities = self._imap.capability()
                     if typ != "OK":
                         raise ImapProtocolError("IMAP CAPABILITY fehlgeschlagen")
@@ -744,13 +754,16 @@ class ImapClient:
                     if typ != "OK":
                         raise ImapProtocolError("IMAP CAPABILITY nach STARTTLS fehlgeschlagen")
 
-                password = self.settings.imap_password.get_secret_value()
+                password = (self._credential_provider() if self._credential_provider
+                            else self.settings.imap_password.get_secret_value())
                 try:
                     typ, _ = self._imap.login(self.settings.imap_username, password)
                 except _IMAP_ABORT:
                     raise
                 except _IMAP_ERROR as exc:
                     raise AuthenticationError("IMAP-Authentifizierung fehlgeschlagen") from exc
+                finally:
+                    password = ""
                 if typ != "OK":
                     raise AuthenticationError("IMAP-Authentifizierung fehlgeschlagen")
                 logger.info(
@@ -807,6 +820,7 @@ class ImapClient:
         logger.info("IMAP disconnect")
         self._imap = None
         self._selected_mailbox = None
+        self.uidvalidity = None
 
     def _ensure_connection(self) -> None:
         if self._imap is None:
@@ -826,10 +840,28 @@ class ImapClient:
         if self._imap is None:
             raise ImapProtocolError("No IMAP connection for mailbox select")
         encoded_mailbox = encode_mailbox_name(mailbox)
+        if self._connector is not None:
+            encoded_mailbox = _quote_imap_string(encoded_mailbox)
         typ, _data = self._imap.select(encoded_mailbox, readonly=True)
         if typ != "OK":
             raise MailboxNotFoundError(f"Mailbox '{mailbox}' wurde nicht gefunden")
         self._selected_mailbox = mailbox
+        if self._connector is not None:
+            _, validity = self._imap.response("UIDVALIDITY")
+            if not validity or not isinstance(validity[0], bytes) or not validity[0].isdigit():
+                raise ImapProtocolError("UIDVALIDITY fehlt")
+            self.uidvalidity = int(validity[0])
+            expected = self._expected_validity.setdefault(mailbox, self.uidvalidity)
+            if expected != self.uidvalidity:
+                raise MessageNotFoundError("Message reference is stale")
+
+    def pin_mailbox(self, mailbox: str, uidvalidity: int | None = None) -> int:
+        if uidvalidity is not None:
+            self._expected_validity[mailbox] = uidvalidity
+        self.ensure_mailbox(mailbox)
+        if self.uidvalidity is None or self.uidvalidity != self._expected_validity.get(mailbox):
+            raise MessageNotFoundError("Message reference is stale")
+        return self.uidvalidity
 
     def _run(
         self,
@@ -922,6 +954,20 @@ class ImapClient:
 
         self.ensure_mailbox(mailbox)
 
+        window_next: int | None = None
+        if self._connector is not None:
+            if before_uid is None:
+                assert self._imap is not None
+                _, values = self._imap.response("UIDNEXT")
+                if not values or not isinstance(values[0], bytes) or not values[0].isdigit():
+                    raise ImapProtocolError("UIDNEXT fehlt")
+                before_uid = int(values[0]) - 1
+                if before_uid == 0:
+                    return [], None
+            lower = max(1, before_uid - 999)
+            window_next = lower - 1 if lower > 1 else None
+            criteria = [*criteria, "UID", f"{lower}:{before_uid}"]
+
         if before_uid is not None:
             if before_uid < 1:
                 raise InvalidSearchParameterError("before_uid muss >= 1 sein")
@@ -939,10 +985,10 @@ class ImapClient:
             uids = _extract_uids(data or [])
             uids.sort(reverse=True)
             if not uids:
-                return [], None
+                return [], window_next
 
             selected = uids[:limit]
-            next_before_uid = selected[-1] - 1 if selected and len(uids) > limit and selected[-1] > 1 else None
+            next_before_uid = selected[-1] - 1 if selected and len(uids) > limit and selected[-1] > 1 else window_next
             return selected, next_before_uid
 
         return self._run(action, mailbox=mailbox)

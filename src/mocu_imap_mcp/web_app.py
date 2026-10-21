@@ -15,11 +15,14 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .accounts import AccountInput
-from .multi_tools import register, role
+from .auth_context import Principal, challenge, principal, require_access
+from .multi_tools import register
 from .runtime import Runtime
 
 _HEADERS = {
-    "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "no-referrer",
+    # no-referrer makes Chromium form navigations send Origin:null. Origin-only
+    # referrers preserve the strict POST check without exposing secret URL paths.
+    "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "strict-origin",
     "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
     "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
 }
@@ -37,25 +40,35 @@ class AccessBoundary:
         request = Request(scope)
         settings = self.runtime.settings
         peer = request.client.host if request.client else ""
-        current_role = ""
+        identity = None
         if settings.access_mode == "trusted_proxy" and peer in settings.trusted_proxy_ips:
-            if request.headers.get("x-mocu-subject"):
-                current_role = request.headers.get("x-mocu-role", "")
+            names = ["issuer", "subject", "role", "scopes", "auth-type"]
+            values = [request.headers.getlist("x-mocu-" + name) for name in names]
+            ambiguous = any(b"_" in name for name, _ in scope["headers"] if name.startswith(b"x"))
+            if not ambiguous and all(len(v) == 1 and v[0] for v in values):
+                issuer, subject, role, scopes, auth_type = [v[0] for v in values]
+                if issuer == settings.oidc_issuer and role in {"reader", "admin"}:
+                    identity = Principal(issuer, subject, frozenset(scopes.split()), role, auth_type)
         elif settings.access_mode == "local" and peer in {"127.0.0.1", "::1", "testclient"}:
-            current_role = "reader"
+            identity = Principal("local", "local-reader", frozenset({"mocu:read"}), "reader", "local")
         if scope["path"] not in {"/healthz", "/readyz"}:
-            if current_role not in {"reader", "admin"}:
-                await JSONResponse({"error": "Authentifizierung erforderlich"}, status_code=401)(scope, receive, send)
+            is_setup = scope["path"].startswith("/setup/")
+            if identity is None or (settings.access_mode == "trusted_proxy" and
+                                    identity.auth_type != ("session" if is_setup else "bearer")):
+                await JSONResponse({"error": "Authentifizierung erforderlich"}, status_code=401,
+                    headers={"WWW-Authenticate": challenge(settings.public_base_url.rstrip("/") + "/mcp")})(
+                        scope, receive, send)
                 return
-            if scope["path"].startswith("/setup/") and current_role != "admin":
+            if "mocu:read" not in identity.scopes or (is_setup and (
+                    identity.role != "admin" or "mocu:admin" not in identity.scopes)):
                 await JSONResponse({"error": "Administrative Authentifizierung erforderlich"},
                                    status_code=403)(scope, receive, send)
                 return
-        context = role.set(current_role)
+        context = principal.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
-            role.reset(context)
+            principal.reset(context)
 
 
 def create_app(runtime: Runtime) -> ASGIApp:
@@ -83,11 +96,17 @@ def create_app(runtime: Runtime) -> ASGIApp:
         token = request.path_params["token"]
         if len(token) > 128:
             return HTMLResponse("Einrichtung ungueltig", status_code=400, headers=_HEADERS)
+        owner = require_access(admin=True)
+        try:
+            runtime.store.check_owner(token, owner)
+        except ValueError:
+            return HTMLResponse("Einrichtung ungueltig", status_code=403, headers=_HEADERS)
         if request.method == "GET":
             csrf = secrets.token_urlsafe(32)
             response = HTMLResponse(
                 '<!doctype html><html lang="de"><meta charset="utf-8"><title>MoCu Konto einrichten</title>'
-                '<h1>IMAP-Konto einrichten</h1><form method="post">'
+                '<h1>IMAP-Konto einrichten</h1><p>Alle freigeschalteten Reader dieser Installation '
+                'koennen alle aktivierten Konten lesen. Keine Mandantentrennung.</p><form method="post">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 '<label>Anzeigename <input name="display_name" required maxlength="120"></label><br>'
                 '<label>IMAP-Host <input name="imap_host" required maxlength="253"></label><br>'
@@ -121,7 +140,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
             account = AccountInput.model_validate(form)
             from starlette.concurrency import run_in_threadpool
 
-            await run_in_threadpool(runtime.setup, token, account)
+            await run_in_threadpool(runtime.setup, token, account, owner)
         except Exception:
             return HTMLResponse("Einrichtung fehlgeschlagen. Eingaben oder Verbindungsdaten pruefen.",
                                 status_code=400, headers=_HEADERS)

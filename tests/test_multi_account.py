@@ -9,6 +9,7 @@ from mcp.server.mcpserver import MCPServer
 from starlette.testclient import TestClient
 
 from mocu_imap_mcp.accounts import AccountError
+from mocu_imap_mcp.auth_context import require_access
 from mocu_imap_mcp.imap_client import MailboxInfo
 from mocu_imap_mcp.models import AttachmentMeta
 from mocu_imap_mcp.multi_search import search
@@ -80,18 +81,22 @@ def test_mcp_registration_requires_reference_and_sanitizes(runtime: Runtime) -> 
 
 
 def test_web_admin_and_csrf_boundaries(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
-    token, _ = runtime.store.begin_setup()
+    token, _ = runtime.store.begin_setup(owner=require_access())
     with TestClient(create_app(runtime), base_url="https://imap-mcp.example.at") as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/setup/" + token).status_code == 403
     runtime.settings.access_mode = "trusted_proxy"
     runtime.settings.trusted_proxy_ips = ["testclient"]
+    runtime.settings.oidc_issuer = "https://issuer.example/realm"
     with TestClient(create_app(runtime), base_url="https://imap-mcp.example.at") as client:
         assert client.get("/setup/" + token).status_code == 401
-        headers = {"x-mocu-subject": "fixture-admin", "x-mocu-role": "admin"}
+        headers = {"x-mocu-subject": "fixture-admin", "x-mocu-role": "admin",
+                   "x-mocu-issuer": runtime.settings.oidc_issuer, "x-mocu-scopes": "mocu:read mocu:admin",
+                   "x-mocu-auth-type": "session"}
         response = client.get("/setup/" + token, headers=headers)
         assert response.status_code == 200
         assert "no-store" in response.headers["cache-control"]
+        assert response.headers["referrer-policy"] == "strict-origin"
         assert "Secure" in response.headers["set-cookie"]
         assert client.post("/setup/" + token, headers=headers, data={}).status_code == 403
         headers["origin"] = "https://imap-mcp.example.at"
@@ -107,9 +112,12 @@ def test_web_admin_and_csrf_boundaries(runtime: Runtime, monkeypatch: pytest.Mon
 def test_http_mcp_admin_identity_reaches_tool(runtime: Runtime) -> None:
     runtime.settings.access_mode = "trusted_proxy"
     runtime.settings.trusted_proxy_ips = ["testclient"]
+    runtime.settings.oidc_issuer = "https://issuer.example/realm"
     runtime.settings.mcp_allowed_hosts = ["imap-mcp.example.at"]
     with TestClient(create_app(runtime), base_url="https://imap-mcp.example.at") as client:
         headers = {"x-mocu-subject": "fixture", "x-mocu-role": "reader",
+                   "x-mocu-issuer": runtime.settings.oidc_issuer, "x-mocu-scopes": "mocu:read mocu:admin",
+                   "x-mocu-auth-type": "bearer",
                    "Accept": "application/json, text/event-stream"}
         body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "begin_account_setup", "arguments": {}}}

@@ -17,3 +17,5 @@ secrets/
 *.sqlite3-*
 *.key
 data/
+Vorgabe/
+*.pem

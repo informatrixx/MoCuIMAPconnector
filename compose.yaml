@@ -17,6 +17,7 @@ services:
       MCP_BIND: 0.0.0.0
       MCP_PORT: 8765
       ACCESS_MODE: trusted_proxy
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set exact verified issuer or use the standalone compose.auth.yaml profile}
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-[]}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://imap-mcp.example.at}
       MCP_ALLOWED_HOSTS: '["imap-mcp.example.at", "127.0.0.1", "127.0.0.1:*"]'

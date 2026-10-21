@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from .auth_context import Principal
 from .credentials import CredentialVault, SealedPassword
 
 
@@ -57,7 +58,7 @@ class AccountStore:
         self.vault = vault
         with self.connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise AccountError("Unbekannte Datenbankversion")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -70,8 +71,13 @@ class AccountStore:
                   token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                   claimed INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0,
                   account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE);
-                PRAGMA user_version=1;
             """)
+            if version < 2:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ALTER TABLE setup_tokens ADD COLUMN owner_issuer TEXT")
+                db.execute("ALTER TABLE setup_tokens ADD COLUMN owner_subject TEXT")
+                db.execute("DELETE FROM setup_tokens")
+                db.execute("PRAGMA user_version=2")
             for row in db.execute("SELECT id,ciphertext,nonce,key_id,format_version FROM accounts"):
                 vault.decrypt(row["id"], self._sealed(row))
 
@@ -121,7 +127,7 @@ class AccountStore:
                 raise AccountError("Kontokonfiguration geaendert; Aufruf neu starten")
             return SecretStr(self.vault.decrypt(account_id, self._sealed(row)))
 
-    def begin_setup(self, account_id: str | None = None) -> tuple[str, float]:
+    def begin_setup(self, account_id: str | None = None, *, owner: Principal) -> tuple[str, float]:
         if account_id is not None:
             self.get(account_id)
         token = secrets.token_urlsafe(32)
@@ -130,16 +136,26 @@ class AccountStore:
             db.execute("DELETE FROM setup_tokens WHERE expires_at < ?", (time.time(),))
             if db.execute("SELECT count(*) FROM setup_tokens").fetchone()[0] >= 100:
                 raise AccountError("Zu viele offene Einrichtungen")
-            db.execute("INSERT INTO setup_tokens(token_hash,expires_at,account_id) VALUES(?,?,?)",
-                       (hashlib.sha256(token.encode()).hexdigest(), expires, account_id))
+            db.execute("""INSERT INTO setup_tokens(token_hash,expires_at,account_id,owner_issuer,owner_subject)
+                       VALUES(?,?,?,?,?)""",
+                       (hashlib.sha256(token.encode()).hexdigest(), expires, account_id, owner.issuer, owner.subject))
         return token, expires
 
-    def claim(self, token: str) -> str | None:
+    def check_owner(self, token: str, owner: Principal) -> None:
+        with self.connection() as db:
+            row = db.execute("""SELECT 1 FROM setup_tokens WHERE token_hash=? AND owner_issuer=?
+                AND owner_subject=? AND used=0 AND attempts<3 AND expires_at>?""",
+                (hashlib.sha256(token.encode()).hexdigest(), owner.issuer, owner.subject, time.time())).fetchone()
+            if row is None:
+                raise AccountError("Einrichtung ungueltig oder nicht fuer diesen Benutzer")
+
+    def claim(self, token: str, *, owner: Principal) -> str | None:
         digest = hashlib.sha256(token.encode()).hexdigest()
         with self.connection() as db:
             cursor = db.execute("""UPDATE setup_tokens SET claimed=1,attempts=attempts+1
-                WHERE token_hash=? AND used=0 AND claimed=0 AND attempts<3 AND expires_at>?""",
-                                (digest, time.time()))
+                WHERE token_hash=? AND used=0 AND claimed=0 AND attempts<3 AND expires_at>?
+                AND owner_issuer=? AND owner_subject=?""",
+                                (digest, time.time(), owner.issuer, owner.subject))
             if cursor.rowcount != 1:
                 raise AccountError("Einrichtung abgelaufen, verwendet oder gesperrt")
             row = db.execute("SELECT account_id FROM setup_tokens WHERE token_hash=?", (digest,)).fetchone()

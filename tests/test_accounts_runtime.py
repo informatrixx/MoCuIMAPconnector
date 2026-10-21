@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 
 from mocu_imap_mcp.accounts import AccountError, AccountInput, AccountStore
+from mocu_imap_mcp.auth_context import require_access
 from mocu_imap_mcp.credentials import CredentialError, CredentialVault
 from mocu_imap_mcp.runtime import Runtime
 
@@ -18,8 +19,8 @@ def account_input() -> AccountInput:
 
 
 def add_account(runtime: Runtime) -> str:
-    token, _ = runtime.store.begin_setup()
-    runtime.store.claim(token)
+    token, _ = runtime.store.begin_setup(owner=require_access())
+    runtime.store.claim(token, owner=require_access())
     return runtime.store.finish(token, account_input())
 
 
@@ -55,11 +56,12 @@ def test_storage_rotation_backup_and_no_plaintext(runtime: Runtime, tmp_path: Pa
 
 
 def test_tokens_single_claim_and_bounded_retries(runtime: Runtime) -> None:
-    token, _ = runtime.store.begin_setup()
+    owner = require_access()
+    token, _ = runtime.store.begin_setup(owner=owner)
 
     def claim() -> bool:
         try:
-            runtime.store.claim(token)
+            runtime.store.claim(token, owner=owner)
             return True
         except AccountError:
             return False
@@ -68,21 +70,21 @@ def test_tokens_single_claim_and_bounded_retries(runtime: Runtime) -> None:
         assert sum(executor.map(lambda _: claim(), range(4))) == 1
     runtime.store.finish(token, account_input())
     with pytest.raises(AccountError):
-        runtime.store.claim(token)
-    token, _ = runtime.store.begin_setup()
+        runtime.store.claim(token, owner=owner)
+    token, _ = runtime.store.begin_setup(owner=owner)
     for _ in range(3):
-        runtime.store.claim(token)
+        runtime.store.claim(token, owner=owner)
         runtime.store.release(token)
     with pytest.raises(AccountError):
-        runtime.store.claim(token)
+        runtime.store.claim(token, owner=owner)
 
 
 def test_expired_and_disabled_accounts(runtime: Runtime) -> None:
-    token, _ = runtime.store.begin_setup()
+    token, _ = runtime.store.begin_setup(owner=require_access())
     with runtime.store.connection() as db:
         db.execute("UPDATE setup_tokens SET expires_at=0")
     with pytest.raises(AccountError):
-        runtime.store.claim(token)
+        runtime.store.claim(token, owner=require_access())
     account_id = add_account(runtime)
     revision = runtime.store.get(account_id).revision
     runtime.store.set_enabled(account_id, False)
@@ -118,17 +120,17 @@ def test_failed_rotation_rolls_back(runtime: Runtime, monkeypatch: pytest.Monkey
 def test_setup_failure_preserves_account_and_redacts(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
     account_id = add_account(runtime)
     revision = runtime.store.get(account_id).revision
-    token, _ = runtime.store.begin_setup(account_id)
+    token, _ = runtime.store.begin_setup(account_id, owner=require_access())
 
     def fail(*args: object, **kwargs: object) -> None:
         raise TimeoutError("synthetic failure")
 
     monkeypatch.setattr("mocu_imap_mcp.runtime.connection_factory", fail)
     with pytest.raises(Exception, match="IMAP-Verbindung"):
-        runtime.setup(token, account_input())
+        runtime.setup(token, account_input(), require_access())
     assert runtime.store.get(account_id).revision == revision
     assert runtime.store.password(account_id).get_secret_value() == "synthetic-password-only"
-    runtime.store.claim(token)
+    runtime.store.claim(token, owner=require_access())
 
 
 def test_example_runtime_config_is_parseable() -> None:

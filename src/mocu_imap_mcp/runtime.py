@@ -11,6 +11,7 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .accounts import AccountError, AccountInput, AccountStore
+from .auth_context import Principal
 from .config import Settings
 from .credentials import CredentialVault
 from .imap_client import ImapClient
@@ -25,6 +26,7 @@ class RuntimeSettings(BaseSettings):
     mcp_port: int = Field(default=8765, ge=1, le=65535)
     public_base_url: str = "https://imap-mcp.example.at"
     access_mode: Literal["local", "trusted_proxy"] = "local"
+    oidc_issuer: str = ""
     trusted_proxy_ips: list[str] = Field(default_factory=list)
     mcp_allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1", "127.0.0.1:*", "localhost:*"])
     max_attachment_size_mb: int = Field(default=25, ge=1, le=100)
@@ -44,6 +46,12 @@ class RuntimeSettings(BaseSettings):
             raise ValueError("PUBLIC_BASE_URL darf keinen Pfad enthalten")
         if self.access_mode == "trusted_proxy" and not self.trusted_proxy_ips:
             raise ValueError("TRUSTED_PROXY_IPS muss explizit gesetzt werden")
+        if self.access_mode == "trusted_proxy":
+            from ipaddress import ip_address
+            for peer in self.trusted_proxy_ips:
+                ip_address(peer)
+            if not self.oidc_issuer.startswith("https://"):
+                raise ValueError("OIDC_ISSUER muss explizit gesetzt werden")
         return self
 
 
@@ -87,8 +95,8 @@ class Runtime:
             if self.store.get(account_id).revision != account.revision:
                 raise AccountError("Kontokonfiguration wurde geaendert; Aufruf neu starten")
 
-    def setup(self, token: str, value: AccountInput) -> str:
-        self.store.claim(token)
+    def setup(self, token: str, value: AccountInput, owner: Principal) -> str:
+        self.store.claim(token, owner=owner)
         try:
             with ImapClient(self.client_settings(value), connector=connection_factory,
                             credential_provider=value.password.get_secret_value) as client:

@@ -13,6 +13,9 @@ dependencies = [
   "pydantic>=2.13",
   "pydantic-settings>=2.15",
   "cryptography>=46,<51",
+  "Authlib>=1.9.1,<2",
+  "requests>=2.34.2,<3",
+  "PyJWT>=2.13,<3",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +24,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.12",
   "types-html5lib",
+  "types-requests",
 ]
 
 [tool.setuptools]

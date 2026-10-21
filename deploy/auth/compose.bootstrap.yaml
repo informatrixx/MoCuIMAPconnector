@@ -1,0 +1,7 @@
+# Optional FIRST IMPORT only. Creates an ordinary connector user, not a Keycloak admin.
+services:
+  keycloak:
+    secrets: [initial_user]
+secrets:
+  initial_user:
+    file: ${AUTH_SECRETS_DIR:?External secrets directory}/initial_user

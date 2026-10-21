@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any
@@ -11,9 +10,10 @@ from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from .accounts import AccountError
+from .auth_context import AccessDenied, MissingScope, challenge, require_access
 from .mail_content import read_email
 from .multi_search import search
 from .runtime import Runtime
@@ -25,29 +25,31 @@ from .security import (
 )
 from .tools.attachments import _RESOURCE_MIME_MAP, _resource_prefix
 
-role: ContextVar[str] = ContextVar("mocu_role", default="")
 
-
-def require_admin() -> None:
-    if role.get() != "admin":
-        raise AccountError("Administrative Authentifizierung erforderlich")
-
-
-def safe_call(function: Callable[..., Any], *, resource: bool = False) -> Callable[..., Any]:
+def safe_call(function: Callable[..., Any], *, resource: bool = False,
+              resource_url: str = "", admin: bool = False) -> Callable[..., Any]:
     @wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         started = time.monotonic()
         logger = logging.getLogger("mocu_imap_mcp.tools")
         try:
+            require_access(admin=admin)
             result = function(*args, **kwargs)
             count = result.get("count") if isinstance(result, dict) else None
             logger.info("tool=%s duration=%.3f count=%s", function.__name__, time.monotonic() - started, count)
             return result
+        except MissingScope as exc:
+            if resource:
+                raise ResourceError("OAuth-Scope mocu:read erforderlich") from None
+            return CallToolResult(content=[TextContent(type="text", text=str(exc))], is_error=True,
+                                  structured_content={},
+                                  _meta={"mcp/www_authenticate": [challenge(resource_url, exc.scope)]})
         except Exception as exc:
             logger.warning("tool=%s error_class=%s", function.__name__, type(exc).__name__)
             error_type = ResourceError if resource else ToolError
             message = "Vorgang fehlgeschlagen; Referenz, Konfiguration oder Verbindung pruefen"
-            if isinstance(exc, (AccountError, MessageNotFoundError, MessageTooLargeError, AttachmentTooLargeError)):
+            if isinstance(exc, (AccessDenied, AccountError, MessageNotFoundError,
+                                MessageTooLargeError, AttachmentTooLargeError)):
                 message = str(exc)
             raise error_type(message) from None
     return wrapped
@@ -63,7 +65,10 @@ def register(server: MCPServer, runtime: Runtime) -> None:
 
     def tool(**kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorate(function: Callable[..., Any]) -> Callable[..., Any]:
-            return server.tool(**kwargs)(safe_call(function))
+            admin = function.__name__ in {"begin_account_setup", "delete_account", "set_account_enabled"}
+            scopes = ["mocu:read", "mocu:admin"] if admin else ["mocu:read"]
+            return server.tool(**kwargs, meta={"securitySchemes": [{"type": "oauth2", "scopes": scopes}]})(
+                safe_call(function, admin=admin, resource_url=runtime.settings.public_base_url.rstrip("/") + "/mcp"))
         return decorate
 
     @tool(description="Verfuegbare Konten ohne Zugangsdaten", annotations=read)
@@ -72,21 +77,21 @@ def register(server: MCPServer, runtime: Runtime) -> None:
 
     @tool(description="Startet administrative HTTPS-Einrichtung; keine Credentials eingeben", annotations=write)
     def begin_account_setup(account_id: str | None = None) -> dict[str, Any]:
-        require_admin()
-        token, expires = runtime.store.begin_setup(account_id)
+        owner = require_access(admin=True)
+        token, expires = runtime.store.begin_setup(account_id, owner=owner)
         return {"setup_url": runtime.settings.public_base_url.rstrip("/") + "/setup/" + token,
                 "expires_at": datetime.fromtimestamp(expires, UTC).isoformat()}
 
     @tool(description="Loescht ausschliesslich lokale Kontokonfiguration; keine Mailbox-Aenderungen",
                  annotations=write)
     def delete_account(account_id: str) -> dict[str, bool]:
-        require_admin()
+        require_access(admin=True)
         runtime.store.delete(account_id)
         return {"deleted": True}
 
     @tool(description="Aktiviert/deaktiviert ausschliesslich lokale Kontokonfiguration", annotations=write)
     def set_account_enabled(account_id: str, enabled: bool) -> dict[str, bool]:
-        require_admin()
+        require_access(admin=True)
         runtime.store.set_enabled(account_id, enabled)
         return {"enabled": enabled}
 

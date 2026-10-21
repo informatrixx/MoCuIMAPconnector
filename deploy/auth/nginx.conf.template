@@ -1,0 +1,155 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+# Error logs can include secret-bearing URLs. Diagnostics use status-only probes.
+error_log /dev/null;
+events { worker_connections 256; }
+http {
+    access_log off;
+    server_tokens off;
+    ignore_invalid_headers on;
+    underscores_in_headers off;
+    client_body_temp_path /tmp/client;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;
+    limit_req_zone $binary_remote_addr zone=mocu:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=setup:10m rate=5r/m;
+    # The connector needs only its CSRF cookie, never the gateway session credential.
+    map $http_cookie $mocu_setup_cookie {
+        default "";
+        "~(?:^|; *)__Host-mocu-csrf=(?<mocu_csrf_value>[A-Za-z0-9_-]{43})(?:;|$)"
+            "__Host-mocu-csrf=$mocu_csrf_value";
+    }
+    client_max_body_size 64k;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_certificate /run/tls/cert.pem;
+    ssl_certificate_key /run/tls/key.pem;
+
+    server {
+        listen 443 ssl default_server;
+        server_name _;
+        return 444;
+    }
+    server {
+        listen 443 ssl;
+        server_name @MCP_HOST@;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        limit_req zone=mocu burst=40 nodelay;
+        location = /.well-known/oauth-protected-resource/mcp {
+            proxy_pass http://gateway:8766;
+            proxy_pass_request_headers off;
+            proxy_set_header Host @MCP_HOST@;
+        }
+        location = /_verify_bearer {
+            internal;
+            proxy_pass http://gateway:8766/verify/bearer;
+            proxy_pass_request_body off;
+            proxy_pass_request_headers off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Authorization $http_authorization;
+        }
+        location = /_verify_session {
+            internal;
+            proxy_pass http://gateway:8766/verify/session;
+            proxy_pass_request_body off;
+            proxy_pass_request_headers off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Cookie $http_cookie;
+        }
+        location = /mcp {
+            auth_request /_verify_bearer;
+            auth_request_set $mcp_challenge $upstream_http_www_authenticate;
+            error_page 403 = @mcp_forbidden;
+            auth_request_set $issuer $upstream_http_x_mocu_issuer;
+            auth_request_set $subject $upstream_http_x_mocu_subject;
+            auth_request_set $role $upstream_http_x_mocu_role;
+            auth_request_set $scopes $upstream_http_x_mocu_scopes;
+            auth_request_set $kind $upstream_http_x_mocu_auth_type;
+            proxy_pass http://mocu-imap:8765;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_pass_request_headers off;
+            proxy_set_header Host @MCP_HOST@;
+            proxy_set_header Content-Type $http_content_type;
+            proxy_set_header Accept $http_accept;
+            proxy_set_header Origin $http_origin;
+            proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+            proxy_set_header Mcp-Session-Id $http_mcp_session_id;
+            proxy_set_header Last-Event-ID $http_last_event_id;
+            proxy_set_header X-Mocu-Issuer $issuer;
+            proxy_set_header X-Mocu-Subject $subject;
+            proxy_set_header X-Mocu-Role $role;
+            proxy_set_header X-Mocu-Scopes $scopes;
+            proxy_set_header X-Mocu-Auth-Type $kind;
+        }
+        location ~ "^/setup/[A-Za-z0-9_-]{43}$" {
+            limit_req zone=setup burst=20 nodelay;
+            client_max_body_size 16k;
+            auth_request /_verify_session;
+            error_page 401 = @browser_login;
+            auth_request_set $issuer $upstream_http_x_mocu_issuer;
+            auth_request_set $subject $upstream_http_x_mocu_subject;
+            auth_request_set $role $upstream_http_x_mocu_role;
+            auth_request_set $scopes $upstream_http_x_mocu_scopes;
+            auth_request_set $kind $upstream_http_x_mocu_auth_type;
+            proxy_pass http://mocu-imap:8765;
+            proxy_pass_request_headers off;
+            proxy_set_header Host @MCP_HOST@;
+            proxy_set_header Content-Type $http_content_type;
+            proxy_set_header Cookie $mocu_setup_cookie;
+            proxy_set_header Origin $http_origin;
+            proxy_set_header X-Mocu-Issuer $issuer;
+            proxy_set_header X-Mocu-Subject $subject;
+            proxy_set_header X-Mocu-Role $role;
+            proxy_set_header X-Mocu-Scopes $scopes;
+            proxy_set_header X-Mocu-Auth-Type $kind;
+        }
+        location @browser_login {
+            if ($request_method != GET) { return 401; }
+            set $setup_return $uri;
+            rewrite ^ /auth/login? break;
+            proxy_pass http://gateway:8766;
+            proxy_pass_request_body off;
+            proxy_pass_request_headers off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Host @MCP_HOST@;
+            proxy_set_header X-Mocu-Return $setup_return;
+        }
+        location @mcp_forbidden {
+            add_header WWW-Authenticate $mcp_challenge always;
+            return 403;
+        }
+        location /auth/ {
+            proxy_pass http://gateway:8766;
+            proxy_pass_request_headers off;
+            proxy_set_header Host @MCP_HOST@;
+            proxy_set_header Content-Type $http_content_type;
+            proxy_set_header Cookie $http_cookie;
+            proxy_set_header Origin $http_origin;
+        }
+        location / { return 404; }
+    }
+    server {
+        listen 443 ssl;
+        server_name @AUTH_HOST@;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        location / {
+            proxy_pass http://keycloak:8080;
+            proxy_set_header Host @AUTH_HOST@;
+            proxy_set_header X-Forwarded-Host @AUTH_HOST@;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Port 443;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+        # Provider administration is via an operator's private connection, not public.
+        location /admin/ { return 403; }
+        location /realms/master/ { return 403; }
+        location ~ /clients-registrations/ { return 403; }
+    }
+}

@@ -41,25 +41,27 @@ der Prozessstart verwendet die Multi-Account-Implementierung.
 
 ## Authentifizierung und Freigabe
 
-SECURITY-TODO vor Internetbetrieb: realen Auth-Dienst integrieren und Ende
-zu Ende testen. Der Connector implementiert keinen OAuth-Authorization-Server.
+Separater OAuth/OIDC-Gateway und ein Keycloak-Referenzprofil sind implementiert.
+Installation: [AUTH_DEPLOYMENT](docs/AUTH_DEPLOYMENT.md).
+Nachweise und noch erforderliche Live-Abnahme: [AUTH_ACCEPTANCE](docs/AUTH_ACCEPTANCE.md).
+Der Connector implementiert keinen OAuth-Authorization-Server.
 
 - `ACCESS_MODE=local`: lokale Mailzugriffe erlaubt, administrative Tools und
   Setup gesperrt. Nicht als Authentifizierung vor einem öffentlichen Proxy verwenden.
 - `ACCESS_MODE=trusted_proxy`: nur explizite direkte Peer-IP-Adressen aus
-  `TRUSTED_PROXY_IPS` dürfen verifizierte `X-Mocu-Subject` und
-  `X-Mocu-Role` (`reader`/`admin`) liefern. Unbekannte Peers/Rollen
+  `TRUSTED_PROXY_IPS` dürfen verifizierte Issuer-, Subject-, Role-, Scope- und
+  Auth-Type-Header liefern. Unbekannte Peers/Rollen
   werden abgewiesen. Kein Vertrauen in X-Forwarded-For.
 - Proxy muss Identity-Header aus externen Requests ersetzen, OAuth-Tokens
   prüfen und administrative Browser-Sessions authentifizieren. Leser dürfen
   alle aktivierten Konten lesen; Admin-Rechte autorisieren lokale Änderungen.
-- nginx-Beispiel verweigert Zugriffe bis zur Integration des Auth-Verifiers.
+- `compose.auth.yaml` verdrahtet zwei interne Auth-Verifier mit nginx.
   TLS oder ein Tunnel allein ersetzen keine administrative Autorisierung.
 - ChatGPT benötigt den offiziell unterstützten MCP-OAuth-Weg am Gateway,
   einschließlich Discovery und Token-Verifikation. Das ist vom IMAP-Passwort
   getrennt. Keine selbst erfundenen Tunnel-Kommandos einsetzen.
 
-Offizielle Quellen, geprüft am 2026-09-09:
+Offizielle Quellen, geprüft am 2026-10-21:
 [OpenAI MCP-Authentifizierung](https://developers.openai.com/plugins/build/auth),
 [cryptography AES-GCM](https://cryptography.io/en/latest/hazmat/primitives/aead/#cryptography.hazmat.primitives.ciphers.aead.AESGCM).
 
@@ -85,6 +87,7 @@ os.chown('/etc/mocu-imap-mcp/master.key', 10001, 10001)
 PY
 export MOCU_MASTER_KEY_HOST_FILE=/etc/mocu-imap-mcp/master.key
 export PUBLIC_BASE_URL=https://imap-mcp.example.at
+export OIDC_ISSUER=https://auth.example.at/realms/mocu
 # Tatsächliche direkte Proxy-IP als JSON-Liste einsetzen:
 export TRUSTED_PROXY_IPS='["127.0.0.1"]'
 docker compose build
@@ -142,7 +145,9 @@ Nach Einrichtung des geschützten Admin-Zugangs:
 6. `set_account_enabled(account_id, false)` deaktiviert,
    `delete_account(account_id)` entfernt nur lokale Konfiguration. Beide verlangen Admin-Rechte.
 
-Tokenbesitz allein reicht nicht: Admin-Authentifizierung plus CSRF-/Origin-Prüfung.
+Tokenbesitz allein reicht nicht: dieselbe Admin-Identität (Issuer + Subject),
+Browser-Session und CSRF-/Origin-Prüfung sind erforderlich. Migration auf DB-Schema 2
+invalidiert alte ungebundene Setup-Tokens, erhält aber verschlüsselte Accounts.
 Drei Verbindungsversuche pro Token, atomare Claims. Abgebrochene Claims bleiben
 bis Ablauf gesperrt. Setup-Tokenpfade werden nicht in Access-Logs geschrieben.
 Rate-Limit am vorgeschalteten Proxy aktivieren; Beispiel enthält Setup-Limits.
@@ -203,6 +208,7 @@ gespeicherten Credentials und scheitert mit falschem Key.
 
 ## Einschränkungen
 
-Öffentliche OAuth-/ChatGPT-Anbindung und echte Provider müssen beim Betreiber
-noch getestet werden. Kein internes Netz als IMAP-Ziel, keine automatische
+Live-ChatGPT-Anbindung und echte Testpostfächer müssen beim Betreiber noch
+abgenommen werden. Keycloak Resource Indicators sind experimentell.
+Kein internes Netz als IMAP-Ziel, keine automatische
 Key-Verwaltung, keine mehreren Replikate auf derselben SQLite-Datenbank.

@@ -1,0 +1,112 @@
+# Standalone PUBLIC profile; do not merge with compose.yaml (which publishes a local port).
+services:
+  mocu-imap:
+    build: .
+    image: mocu-imap:public-auth-review
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:noexec,nosuid,size=16m"]
+    volumes: [mocu_data:/data]
+    secrets: [mocu_master_key]
+    environment:
+      MCP_BIND: 0.0.0.0
+      ACCESS_MODE: trusted_proxy
+      TRUSTED_PROXY_IPS: '["${AUTH_PROXY_IP:?Set exact proxy IP}"]'
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set exact issuer}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set HTTPS origin}
+      MCP_ALLOWED_HOSTS: '["${MCP_HOST:?Set host}", "127.0.0.1", "127.0.0.1:*"]'
+    networks: [auth]
+  gateway:
+    image: mocu-imap:public-auth-review
+    command: [python, -m, mocu_imap_mcp.auth_gateway]
+    restart: on-failure:10
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:noexec,nosuid,size=8m"]
+    secrets: [admin_client]
+    volumes:
+      - ${AUTH_CA_FILE:?Set provider CA bundle}:/run/ca.pem:ro
+    environment:
+      GATEWAY_BIND: 0.0.0.0
+      GATEWAY_PROXY_IPS: '["${AUTH_PROXY_IP}"]'
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_CA_FILE: /run/ca.pem
+      MCP_RESOURCE: ${PUBLIC_BASE_URL}/mcp
+      ADMIN_OIDC_CLIENT_SECRET_FILE: /run/secrets/admin_client
+      ALLOWED_SUBJECTS: ${ALLOWED_SUBJECTS:?Explicit subject allowlist required}
+      ADMIN_SUBJECTS: ${ADMIN_SUBJECTS:?Explicit admin allowlist required}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/.well-known/oauth-protected-resource/mcp', timeout=3)"]
+    networks: [auth]
+  proxy:
+    image: nginx:stable-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5
+    user: "101:101"
+    entrypoint: [/bin/sh, -c, 'nginx -t -e stderr && exec nginx -g "daemon off;"']
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls: {net.ipv4.ip_unprivileged_port_start: "0"}
+    tmpfs: ["/tmp:noexec,nosuid,size=16m"]
+    volumes:
+      - ${AUTH_CONFIG_DIR:?External generated config directory required}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${AUTH_TLS_DIR:?External certificate directory required}:/run/tls:ro
+    ports: ["${AUTH_LISTEN_IP:-127.0.0.1}:${AUTH_HTTPS_PORT:-8443}:443"]
+    networks:
+      auth:
+        ipv4_address: ${AUTH_PROXY_IP}
+        aliases: ["${MCP_HOST}", "${AUTH_HOST:?Set issuer host}"]
+    depends_on: [mocu-imap, gateway, keycloak]
+  keycloak:
+    build:
+      context: .
+      dockerfile: deploy/auth/Keycloak.Dockerfile
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=64m", "/opt/keycloak/data:size=64m,uid=1000,gid=0"]
+    secrets: [provider_db, chatgpt_client, admin_client]
+    volumes:
+      - ${AUTH_CONFIG_DIR}/realm.json:/opt/keycloak/data/import/realm.json:ro
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://provider-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_HOSTNAME: https://${AUTH_HOST}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: ${AUTH_PROXY_IP}
+      KC_LOG_LEVEL: warn
+      KC_HTTP_ACCESS_LOG_ENABLED: "false"
+    depends_on:
+      provider-db: {condition: service_healthy}
+    networks: [auth]
+  provider-db:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD_FILE: /run/secrets/provider_db
+    secrets: [provider_db]
+    volumes: [provider_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U keycloak -d keycloak]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [auth]
+secrets:
+  mocu_master_key: {file: "${AUTH_SECRETS_DIR:?External secrets directory required}/master_key"}
+  provider_db: {file: "${AUTH_SECRETS_DIR}/provider_db"}
+  admin_client: {file: "${AUTH_SECRETS_DIR}/admin_client"}
+  chatgpt_client: {file: "${AUTH_SECRETS_DIR}/chatgpt_client"}
+volumes:
+  mocu_data:
+  provider_data:
+networks:
+  auth:
+    ipam:
+      config:
+        - subnet: ${AUTH_SUBNET:?Choose unused subnet}
+          ip_range: ${AUTH_DYNAMIC_RANGE:?Reserve a separate dynamic range excluding proxy IP}

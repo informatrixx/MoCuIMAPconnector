@@ -6,5 +6,10 @@
 !requirements.lock
 !README.md
 !Dockerfile
+!deploy/
+!deploy/auth/
+!deploy/auth/keycloak-start.sh
+!scripts/
+!scripts/auth_browser_test.py
 **/__pycache__/
 **/*.pyc

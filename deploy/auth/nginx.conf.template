@@ -64,6 +64,8 @@ http {
         }
         location = /mcp {
             auth_request /_verify_bearer;
+            # auth_request forwards WWW-Authenticate for 401 itself; do not add it twice.
+            # 403 needs the named location below, with an empty value for allowlist denial.
             auth_request_set $mcp_challenge $upstream_http_www_authenticate;
             error_page 403 = @mcp_forbidden;
             auth_request_set $issuer $upstream_http_x_mocu_issuer;

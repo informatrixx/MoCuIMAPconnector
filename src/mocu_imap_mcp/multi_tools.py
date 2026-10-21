@@ -43,7 +43,8 @@ def safe_call(function: Callable[..., Any], *, resource: bool = False,
                 raise ResourceError("OAuth-Scope mocu:read erforderlich") from None
             return CallToolResult(content=[TextContent(type="text", text=str(exc))], is_error=True,
                                   structured_content={},
-                                  _meta={"mcp/www_authenticate": [challenge(resource_url, exc.scope)]})
+                                  _meta={"mcp/www_authenticate": [challenge(resource_url,
+                                      error="insufficient_scope", scope=exc.scope)]})
         except Exception as exc:
             logger.warning("tool=%s error_class=%s", function.__name__, type(exc).__name__)
             error_type = ResourceError if resource else ToolError

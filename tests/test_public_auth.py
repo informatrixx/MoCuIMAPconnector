@@ -170,6 +170,105 @@ def test_http_gateway_auth_failure_and_secret_redaction(provider: tuple[Provider
         assert client.get("/.well-known/oauth-protected-resource/mcp").status_code == 200
 
 
+@pytest.mark.parametrize(("case", "status", "error", "scope"), [
+    ("missing", 401, None, None),
+    ("malformed", 401, "invalid_token", None),
+    ("expired", 401, "invalid_token", None),
+    ("signature", 401, "invalid_token", None),
+    ("issuer", 401, "invalid_token", None),
+    ("audience", 401, "invalid_token", None),
+    ("id-token", 401, "invalid_token", None),
+    ("not-yet-valid", 401, "invalid_token", None),
+    ("no-scope", 403, "insufficient_scope", "mocu:read"),
+    ("unlisted", 403, None, None),
+    ("valid", 204, None, None),
+])
+def test_gateway_bearer_challenge_contract(provider: tuple[Provider, object], case: str, status: int,
+                                          error: str | None, scope: str | None,
+                                          caplog: pytest.LogCaptureFixture) -> None:
+    service, key = provider
+    service.settings.gateway_proxy_ips = ["testclient"]
+    marker = "synthetic-secret-must-not-leak"
+    claims = {"iss": service.settings.oidc_issuer, "aud": service.settings.mcp_resource,
+              "exp": int(time.time()) + 300, "sub": "admin", "typ": "Bearer", "scope": "mocu:read",
+              "private_marker": marker}
+    changes = {"expired": {"exp": 1}, "issuer": {"iss": "https://wrong.example"},
+               "audience": {"aud": "other"}, "id-token": {"typ": "ID"},
+               "not-yet-valid": {"nbf": 9999999999}, "no-scope": {"scope": "openid"},
+               "unlisted": {"sub": "not-allowed"}}
+    claims.update(changes.get(case, {}))
+    if case == "signature":
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = marker if case == "malformed" else jwt.encode(claims, key, algorithm="RS256",
+                                                         headers={"kid": "fixture"})
+    headers = {} if case == "missing" else {"Authorization": "Bearer " + token}
+    with TestClient(create_gateway(service.settings, service)) as client:
+        response = client.get("/verify/bearer", headers=headers)
+    assert response.status_code == status
+    expected = []
+    if case not in {"unlisted", "valid"}:
+        value = 'Bearer resource_metadata="https://imap.example/.well-known/oauth-protected-resource/mcp"'
+        if error:
+            value += f', error="{error}"'
+        if scope:
+            value += f', scope="{scope}"'
+        expected = [value]
+    assert response.headers.get_list("www-authenticate") == expected
+    for secret in (token, marker):
+        assert secret not in response.text
+        assert secret not in str(response.headers)
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(("headers", "error"), [
+    ({"Authorization": "Bearer "}, "invalid_token"),
+    ({"Authorization": "Basic synthetic-marker"}, None),
+    ({"Authorization": "Bearer one two"}, "invalid_token"),
+    ([("Authorization", "Bearer a"), ("Authorization", "Bearer b")], "invalid_token"),
+])
+def test_ambiguous_or_invalid_authorization_stays_rejected(provider: tuple[Provider, object],
+                                                          headers: dict | list, error: str | None) -> None:
+    service, _ = provider
+    service.settings.gateway_proxy_ips = ["testclient"]
+    with TestClient(create_gateway(service.settings, service)) as client:
+        response = client.get("/verify/bearer", headers=headers)
+    assert response.status_code == 401
+    value = 'Bearer resource_metadata="https://imap.example/.well-known/oauth-protected-resource/mcp"'
+    if error:
+        value += f', error="{error}"'
+    assert response.headers.get_list("www-authenticate") == [value]
+
+
+def test_provider_failure_does_not_invent_scope_or_leak_secret(provider: tuple[Provider, object],
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    service, _ = provider
+    service.settings.gateway_proxy_ips = ["testclient"]
+    def unavailable(token: str) -> Principal:
+        raise OSError("synthetic-provider-secret")
+    monkeypatch.setattr(service, "access", unavailable)
+    with TestClient(create_gateway(service.settings, service)) as client:
+        response = client.get("/verify/bearer", headers={"Authorization": "Bearer synthetic-token"})
+    assert response.status_code == 401
+    assert 'error="invalid_token"' in response.headers["www-authenticate"]
+    assert "insufficient_scope" not in response.headers["www-authenticate"]
+    assert "synthetic-provider-secret" not in response.text + str(response.headers) + caplog.text
+
+
+def test_browser_and_untrusted_peer_denials_have_no_bearer_challenge(provider: tuple[Provider, object]) -> None:
+    service, _ = provider
+    with TestClient(create_gateway(service.settings, service)) as client:
+        assert client.get("/verify/bearer").status_code == 403
+        assert "www-authenticate" not in client.get("/verify/bearer").headers
+        service.settings.gateway_proxy_ips = ["testclient"]
+        for path in ("/verify/session", "/auth/session", "/auth/callback"):
+            response = client.get(path)
+            assert response.status_code in (400, 401)
+            assert "www-authenticate" not in response.headers
+        response = client.post("/auth/logout", data={"csrf": "wrong"})
+        assert response.status_code == 403
+        assert "www-authenticate" not in response.headers
+
+
 def test_unlisted_signed_user_is_forbidden_without_login_loop(provider: tuple[Provider, object]) -> None:
     service, key = provider
     service.settings.gateway_proxy_ips = ["testclient"]
@@ -196,6 +295,31 @@ def test_connector_untrusted_peer_duplicate_headers_wrong_auth_kind(runtime: Run
         assert client.post("/mcp", headers=headers, json={}).status_code == 401
 
 
+def test_connector_challenges_are_not_browser_or_role_errors(runtime: Runtime) -> None:
+    runtime.settings.access_mode = "trusted_proxy"
+    runtime.settings.oidc_issuer = "https://issuer.example/realm"
+    runtime.settings.trusted_proxy_ips = ["testclient"]
+    headers = {"x-mocu-issuer": runtime.settings.oidc_issuer, "x-mocu-subject": "admin",
+               "x-mocu-role": "admin", "x-mocu-scopes": "openid", "x-mocu-auth-type": "bearer"}
+    discovery = ('Bearer resource_metadata="https://imap-mcp.example.at/'
+                 '.well-known/oauth-protected-resource/mcp"')
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/mcp", json={})
+        assert response.status_code == 401
+        assert response.headers.get_list("www-authenticate") == [discovery]
+        response = client.post("/mcp", headers=headers, json={})
+        assert response.status_code == 403
+        assert response.headers.get_list("www-authenticate") == [
+            discovery + ', error="insufficient_scope", scope="mocu:read"']
+        response = client.post("/setup/" + "a" * 43, json={})
+        assert response.status_code == 401
+        assert "www-authenticate" not in response.headers and "location" not in response.headers
+        headers.update({"x-mocu-auth-type": "session", "x-mocu-role": "reader",
+                        "x-mocu-scopes": "mocu:read mocu:admin"})
+        response = client.post("/setup/" + "a" * 43, headers=headers, json={})
+        assert response.status_code == 403 and "www-authenticate" not in response.headers
+
+
 def test_scope_error_retains_oauth_metadata_and_reader_denial_does_not_loop(runtime: Runtime) -> None:
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
@@ -215,6 +339,9 @@ def test_scope_error_retains_oauth_metadata_and_reader_denial_does_not_loop(runt
                 result = await server.call_tool("begin_account_setup", {})
                 assert result.is_error
                 assert bool(result.meta and "mcp/www_authenticate" in result.meta) == expect_challenge
+                assert result.meta["mcp/www_authenticate"] == [
+                    'Bearer resource_metadata="https://imap-mcp.example.at/.well-known/oauth-protected-resource/mcp", '
+                    'error="insufficient_scope", scope="mocu:admin"']
             finally:
                 principal.reset(marker)
         tools = await server.list_tools()

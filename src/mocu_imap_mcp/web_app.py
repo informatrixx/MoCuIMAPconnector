@@ -53,16 +53,18 @@ class AccessBoundary:
             identity = Principal("local", "local-reader", frozenset({"mocu:read"}), "reader", "local")
         if scope["path"] not in {"/healthz", "/readyz"}:
             is_setup = scope["path"].startswith("/setup/")
+            resource = settings.public_base_url.rstrip("/") + "/mcp"
             if identity is None or (settings.access_mode == "trusted_proxy" and
                                     identity.auth_type != ("session" if is_setup else "bearer")):
                 await JSONResponse({"error": "Authentifizierung erforderlich"}, status_code=401,
-                    headers={"WWW-Authenticate": challenge(settings.public_base_url.rstrip("/") + "/mcp")})(
+                    headers={} if is_setup else {"WWW-Authenticate": challenge(resource)})(
                         scope, receive, send)
                 return
             if "mocu:read" not in identity.scopes or (is_setup and (
                     identity.role != "admin" or "mocu:admin" not in identity.scopes)):
                 await JSONResponse({"error": "Administrative Authentifizierung erforderlich"},
-                                   status_code=403)(scope, receive, send)
+                    status_code=403, headers={} if is_setup else {"WWW-Authenticate": challenge(
+                        resource, error="insufficient_scope", scope="mocu:read")})(scope, receive, send)
                 return
         context = principal.set(identity)
         try:

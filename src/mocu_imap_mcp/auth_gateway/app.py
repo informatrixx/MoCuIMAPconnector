@@ -30,9 +30,12 @@ def create_gateway(settings: GatewaySettings, provider: Provider | None = None,
     service = provider or Provider(settings)
     sessions = state or BrowserState()
 
-    def denied(code: int = 401) -> Response:
+    def denied(code: int = 401, *, authenticate: str | None = None) -> Response:
+        headers = dict(HEADERS)
+        if authenticate is not None:
+            headers["WWW-Authenticate"] = authenticate
         return JSONResponse({"error": "Access denied"}, status_code=code,
-            headers={**HEADERS, "WWW-Authenticate": challenge(settings.mcp_resource)})
+                            headers=headers)
 
     def peer_allowed(request: Request) -> bool:
         return bool(request.client and request.client.host in settings.gateway_proxy_ips)
@@ -50,17 +53,22 @@ def create_gateway(settings: GatewaySettings, provider: Provider | None = None,
         if not peer_allowed(request):
             return denied(403)
         headers = request.headers.getlist("authorization")
-        if len(headers) != 1 or headers[0][:7].lower() != "bearer " or any(c.isspace() for c in headers[0][7:]):
-            return denied()
+        if not headers or (len(headers) == 1 and headers[0].split(" ", 1)[0].lower() != "bearer"):
+            return denied(authenticate=challenge(settings.mcp_resource))
+        if (len(headers) != 1 or headers[0][:7].lower() != "bearer " or not headers[0][7:] or
+                any(c.isspace() for c in headers[0][7:])):
+            return denied(authenticate=challenge(settings.mcp_resource, error="invalid_token"))
         try:
             identity = await run_in_threadpool(service.access, headers[0][7:])
             if "mocu:read" not in identity.scopes:
-                return denied(403)
+                return denied(403, authenticate=challenge(settings.mcp_resource,
+                                                         error="insufficient_scope", scope="mocu:read"))
             return Response(status_code=204, headers=identity_headers(identity))
         except AccessDenied:
-            return JSONResponse({"error": "Access denied"}, status_code=403, headers=HEADERS)
+            return denied(403)
         except Exception:
-            return denied()
+            # Includes unavailable verification infrastructure: no access, never a scope upgrade.
+            return denied(authenticate=challenge(settings.mcp_resource, error="invalid_token"))
 
     async def session_check(request: Request) -> Response:
         if not peer_allowed(request):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,18 @@ def require_access(*, admin: bool = False) -> Principal:
     return current
 
 
-def challenge(resource: str, scope: str = "mocu:read") -> str:
+def challenge(resource: str, *, error: Literal["invalid_token", "insufficient_scope"] | None = None,
+              scope: str | None = None) -> str:
+    """Build discovery/error headers from configuration and fixed values, never claims."""
+    if (any(ord(c) < 33 or ord(c) > 126 or c in {'"', '\\'} for c in resource) or
+            error not in {None, "invalid_token", "insufficient_scope"} or
+            scope not in {None, "mocu:read", "mocu:admin"} or
+            (scope is not None and error != "insufficient_scope")):
+        raise ValueError("Ungueltige OAuth-Challenge-Konfiguration")
     origin = resource.removesuffix("/mcp")
-    return (f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/mcp", '
-            f'error="insufficient_scope", error_description="Required OAuth scope missing", scope="{scope}"')
+    value = f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/mcp"'
+    if error:
+        value += f', error="{error}"'
+    if scope:
+        value += f', scope="{scope}"'
+    return value

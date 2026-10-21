@@ -21,6 +21,19 @@ RESOURCE = ORIGIN + "/mcp"
 CALLBACK = ORIGIN + "/test-callback"
 
 
+def assert_challenge(response: requests.Response, status: int, error: str | None = None,
+                     scope: str | None = None) -> None:
+    """Check raw header count too: requests' merged header can hide duplicates."""
+    assert response.status_code == status
+    expected = f'Bearer resource_metadata="{ORIGIN}/.well-known/oauth-protected-resource/mcp"'
+    if error:
+        expected += f', error="{error}"'
+    if scope:
+        expected += f', scope="{scope}"'
+    assert response.raw.headers.getlist("WWW-Authenticate") == [expected]
+    assert "synthetic-secret-must-not-leak" not in response.text + str(response.headers)
+
+
 def oauth() -> OAuth2Session:
     client = OAuth2Session("mocu-chatgpt", Path("/test/client").read_text().strip(),
         token_endpoint_auth_method="client_secret_basic", redirect_uri=CALLBACK,
@@ -74,7 +87,10 @@ def main() -> None:
     metadata = http.get(ORIGIN + "/.well-known/oauth-protected-resource/mcp", timeout=5).json()
     assert metadata["resource"] == RESOURCE and metadata["authorization_servers"] == [ISSUER]
     unauth = http.post(RESOURCE, json={}, timeout=5)
-    assert unauth.status_code == 401 and "resource_metadata=" in unauth.headers["WWW-Authenticate"]
+    assert_challenge(unauth, 401)
+    invalid = http.post(RESOURCE, headers={"Authorization": "Bearer synthetic-secret-must-not-leak"},
+                        json={}, timeout=5)
+    assert_challenge(invalid, 401, "invalid_token")
     assert http.get(ORIGIN + "/_verify_bearer", timeout=5).status_code == 404
     assert http.post(RESOURCE, headers={"X-Mocu-Role": "admin", "X-Mocu-Subject": "synthetic-admin"},
                      json={}, timeout=5).status_code == 401
@@ -110,16 +126,18 @@ def main() -> None:
                 "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1,
                 "method": "tools/call", "params": {"name": name, "arguments": {}}}, timeout=10)
             assert response.status_code == 200, f"MCP status {response.status_code}"
+            assert "WWW-Authenticate" not in response.headers
             return response.json()["result"]
 
         assert "accounts" in tool(refreshed["access_token"], "list_accounts")["structuredContent"]
         setup = tool(refreshed["access_token"], "begin_account_setup")["structuredContent"]["setup_url"]
-        assert http.post(RESOURCE, headers={"Authorization": "Bearer " + token["id_token"]},
-                         json={}, timeout=5).status_code == 401
+        assert_challenge(http.post(RESOURCE, headers={"Authorization": "Bearer " + token["id_token"]},
+                                   json={}, timeout=5), 401, "invalid_token")
         with oauth() as client:
             reader = client.fetch_token(ISSUER + "/protocol/openid-connect/token",
                 code=code(browser, client, "synthetic-reader"), code_verifier="v" * 64, resource=RESOURCE)
-        assert tool(reader["access_token"], "begin_account_setup")["isError"]
+        reader_denied = tool(reader["access_token"], "begin_account_setup")
+        assert reader_denied["isError"] and "mcp/www_authenticate" not in reader_denied.get("_meta", {})
         for scopes, expected_status in [("openid", 403), ("openid mocu:read", 200)]:
             with oauth() as client:
                 client.scope = scopes
@@ -128,10 +146,13 @@ def main() -> None:
             if expected_status == 403:
                 response = http.post(RESOURCE, headers={"Authorization": "Bearer " + restricted["access_token"]},
                                      json={}, timeout=5)
-                assert response.status_code == 403 and "WWW-Authenticate" in response.headers
+                assert_challenge(response, 403, "insufficient_scope", "mocu:read")
             else:
                 result = tool(restricted["access_token"], "begin_account_setup")
-                assert result["isError"] and result["_meta"]["mcp/www_authenticate"]
+                assert result["isError"] and result["_meta"]["mcp/www_authenticate"] == [
+                    f'Bearer resource_metadata="{ORIGIN}/.well-known/oauth-protected-resource/mcp", '
+                    'error="insufficient_scope", scope="mocu:admin"']
+        print("Auth E2E: exact 401/403 challenges, single proxy headers, scope/role distinction PASS", flush=True)
         for resource, verifier in [("https://wrong.example/mcp", "v" * 64), (RESOURCE, "wrong" * 16)]:
             with oauth() as client:
                 fresh_code = code(browser, client, "synthetic-admin")
@@ -199,6 +220,7 @@ def main() -> None:
                 assert context.request.get(ORIGIN + "/auth/session").status == 401
                 expired = context.request.post(setup, data={})
                 assert expired.status == 401 and "location" not in expired.headers
+                assert "www-authenticate" not in expired.headers
             context.close()
         browser.close()
     print("Auth E2E: admin browser, creator binding, CSRF, logout, cookie isolation PASS", flush=True)
@@ -212,6 +234,7 @@ if __name__ == "__main__":
                 response = client.post(RESOURCE, json={}, verify="/test/ca.pem", timeout=10)
                 assert response.status_code in (500, 502, 503)
                 assert "Location" not in response.headers
+                assert "WWW-Authenticate" not in response.headers
             print("Auth E2E: verifier outage fails closed PASS", flush=True)
         else:
             main()

@@ -5,13 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mocu-imap-mcp"
 version = "0.1.1"
-description = "Read-only MCP server for GMX IMAP mail search and invoice attachment access"
+description = "Read-only multi-account MCP server for generic IMAP mail and invoice attachment access"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=2.0,<3",
   "pydantic>=2.13",
   "pydantic-settings>=2.15",
+  "cryptography>=46,<51",
+  "Authlib>=1.9.1,<2",
+  "requests>=2.34.2,<3",
+  "PyJWT>=2.13,<3",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +24,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.12",
   "types-html5lib",
+  "types-requests",
 ]
 
 [tool.setuptools]

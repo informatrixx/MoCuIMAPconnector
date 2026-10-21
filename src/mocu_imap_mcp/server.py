@@ -3,11 +3,8 @@ from __future__ import annotations
 import logging
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import ValidationError
 
 from .config import Settings, get_settings
-from .security import sanitize_validation_error
 from .tools.attachments import register_attachment_tools
 from .tools.mailboxes import register_mailbox_tools
 from .tools.messages import register_message_tools
@@ -39,31 +36,25 @@ def create_server(settings: Settings | None = None) -> MCPServer:
 
 
 def run() -> None:
+    import os
+
+    import uvicorn
+
+    from .runtime import Runtime, load_runtime_settings
+    from .web_app import create_app
+
+    os.umask(0o077)
+    _configure_logging()
     try:
-        settings = get_settings()
-    except ValidationError as exc:
-        logger.error("Ungültige Konfiguration: %s", sanitize_validation_error(exc))
-        raise
-    _configure_logging(settings.log_level)
-    transport_security = TransportSecuritySettings(
-        allowed_hosts=_as_list(settings.mcp_allowed_hosts),
-        allowed_origins=_as_list(settings.mcp_allowed_origins),
-        enable_dns_rebinding_protection=True,
-    )
-    logger.info("MCP server start host=%s port=%s", settings.mcp_bind, settings.mcp_port)
-    server = create_server(settings)
+        settings = load_runtime_settings()
+        runtime = Runtime(settings)
+    except Exception as exc:
+        logger.error("Start fehlgeschlagen error_class=%s", type(exc).__name__)
+        raise SystemExit(1) from None
+    logger.info("MCP server start")
     try:
-        server.run(
-            transport="streamable-http",
-            host=settings.mcp_bind,
-            port=settings.mcp_port,
-            streamable_http_path=settings.mcp_http_path,
-            max_request_body_size=settings.mcp_max_request_body_size,
-            transport_security=transport_security,
-        )
-    except KeyboardInterrupt:
-        logger.info("MCP server stopped by KeyboardInterrupt")
-        raise
+        uvicorn.run(create_app(runtime), host=settings.mcp_bind, port=settings.mcp_port,
+                    access_log=False, proxy_headers=False)
     finally:
         logger.info("MCP server stopped")
 

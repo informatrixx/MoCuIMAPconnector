@@ -203,7 +203,8 @@ def _disposition_from_node(
     return _find_disposition(node, 0)
 
 
-def _extract_attachment(node: list[BodyStructureToken], part_id: str) -> BodyStructureAttachment | None:
+def attachment_from_node(node: list[BodyStructureToken], part_id: str) -> BodyStructureAttachment | None:
+    """Recognize file parts consistently for attachment listing and body selection."""
     if len(node) < 2:
         return None
     first = _normalize_text(node[0])
@@ -262,7 +263,7 @@ def walk_bodystructure_part(node: BodyStructureToken, part_id: str, attachments:
         _walk_multipart(node, part_id, attachments)
         return
 
-    attachment = _extract_attachment(node, part_id)
+    attachment = attachment_from_node(node, part_id)
     if attachment is not None:
         attachments.append(attachment)
 

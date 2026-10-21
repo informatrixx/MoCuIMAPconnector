@@ -1,0 +1,123 @@
+# Auth-Abnahmeprotokoll
+
+Review-Baseline: `453335ec6fcb1759c697c661c4b06205dda2b4d3`.
+Geprüfter Arbeitsstand: diese Baseline plus uncommitteter Auth-Review-Closeout-Diff
+(CI-Projektinstallation, Fehlerklassifizierung, Regressionstests und dieses Protokoll).
+Arbeitsbranch: `feature/public-auth-e2e`. Prüfdatum: 2026-10-21.
+Kein Commit, Push, Merge, Release oder produktives Deployment im Closeout-Auftrag.
+
+## Historischer Remote-Befund – nicht der korrigierte Arbeitsstand
+
+Der [GitHub-Lauf 39579358078](https://github.com/informatrixx/MoCuIMAPconnector/actions/runs/39579358078)
+vom 2026-10-21 zu `453335ec6fcb1759c697c661c4b06205dda2b4d3` ist **FAIL**:
+fünf erfolgreiche Jobs (vier Python-/Dependency-Kombinationen und Docker),
+ein fehlgeschlagener Auth-E2E-Job. Jobstatus und Commit wurden erneut über GitHub geprüft.
+Der Review meldete dort `ModuleNotFoundError: No module named 'mocu_imap_mcp'`.
+Lokal wurde die Ursache in einer frischen venv nachvollzogen: `requirements.lock`
+allein installiert die Anwendung nicht. Die ursprünglichen 165 lokalen Tests und
+der damalige lokale E2E-Erfolg waren kein Beleg für die fehlende CI-Projektinstallation.
+
+## Korrekturen und Fehlervertrag
+
+- Der Auth-E2E-Job installiert zuerst `requirements.lock`, danach das Projekt mit
+  `python -m pip install --no-deps -e .`; `pip check` und ein expliziter Import
+  müssen vor dem vollständigen Integrationstest erfolgreich sein. Keine Importpfad-Umgehung.
+- Ohne Bearer-Anmeldung: HTTP 401 mit `resource_metadata`, ohne `error`,
+  `error_description` oder Scope-Behauptung. Ein nicht unterstütztes Auth-Schema
+  bleibt abgelehnt und erhält ebenfalls nur die Discovery-Challenge.
+- Ungültige, abgelaufene, falsch signierte, fremde oder ID-Tokens: HTTP 401 mit
+  `error="invalid_token"`. Mehrdeutige Header bleiben abgelehnt. Verifikation bei
+  Providerfehlern bleibt fail-closed und fordert keinen zusätzlichen Scope an.
+- Zugelassenes Subject ohne `mocu:read`: HTTP 403 mit `insufficient_scope` und
+  `scope="mocu:read"`. Nicht freigeschaltete Subjects: HTTP 403 ohne Challenge.
+- Reader erhalten für Admin-Tools weiterhin einen Berechtigungsfehler ohne Reauth.
+  Autorisierte Admins ohne `mocu:admin` erhalten weiterhin den MCP-Toolfehler mit
+  `_meta["mcp/www_authenticate"]` und explizitem `insufficient_scope` für `mocu:admin`.
+- Browserfehler enthalten keine Bearer-Challenge; Setup-POSTs ohne Sitzung bleiben
+  HTTP 401 ohne Redirect oder automatische Wiederholung. Cookies ersetzen keinen Bearer-Token.
+- nginx übernimmt 401-Challenges bereits durch `auth_request`; 403-Challenges kommen
+  aus der bestehenden benannten Fehler-Location. Kein zusätzlicher 401-Header wurde ergänzt.
+  Der echte Proxy-Test prüft Status, exakten Inhalt und genau einen Header.
+
+Grundlagen: [RFC 6750, Abschnitte 3/3.1](https://www.rfc-editor.org/rfc/rfc6750.html#section-3.1)
+und [MCP Authorization 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+
+## Lokale Nachweise
+
+- Unit-/HTTP-Tests umfassen JWT-Signatur/Claims/Token-Art, JWKS-Ausfall/Rotation,
+  Peer-/Headervertrauen, Scope-Challenges ohne Reader-Reauth-Schleife, Context-Isolation,
+  Setup-Erstellerbindung und Schema-Migration mit Erhalt der verschlüsselten Accounts.
+- Browser-State-Tests umfassen falschen State, Fehlercallback/Replays, Nonce,
+  Return-Targets, Sessionfixierung, Idle-/Absolute-Timeout und CSRF-Logout.
+- Bestehende MIME-/UID-/Cursor-/Crypto-/IMAP-Regressionsprüfungen bleiben erhalten;
+  Testfixtures übergeben jetzt explizite Identitäten, keine Produktionsauth-Ausnahme.
+- Container-E2E verwendet echten Keycloak 26.8.1 + PostgreSQL, nginx und Chromium.
+  Der Test muss Discovery/401, Code+PKCE, Refresh, Ressourcenbindung, falschen Verifier,
+  ID-Token-Ablehnung, Reader/Admin, Browser-Setup, fremden Admin und Logout bestehen.
+  IMAP-Providerzugänge werden dabei nicht verwendet.
+
+Ausgeführt am 2026-10-21 unter Linux mit Python 3.13.5, Docker Engine
+26.1.5+dfsg1 und Docker Compose 2.26.1-4, für den oben benannten Arbeitsstand:
+
+| Prüfung | Ergebnis |
+|---|---|
+| pytest (einschließlich bisheriger Regressionen) | PASS, 183 Tests; davon 45 Auth-Tests |
+| Ruff / mypy / `git diff --check` | PASS |
+| MCP-Smoke | PASS, 11 Tools / 12 Resource-Templates |
+| `docker build -t mocu-imap:multi-account-review .` + `scripts/test_docker.py` | PASS; non-root, read-only, Secret-Mount, Health, Persistenz |
+| Frische venv: Locked-Abhängigkeiten, `--no-deps -e .`, `pip check`, Import | PASS |
+| Vollständiger `scripts/test_auth_e2e.py` aus dieser frischen venv | PASS, Exit 0; kein Test ausgelassen |
+| Compose-Builds Connector / Gateway / Keycloak / Chromium-Runner | PASS |
+| Konfigurations-Preflight / echtes `nginx -t` | PASS |
+| Echter Code-Flow + PKCE + Refresh / negative Ressourcen- und Verifierprüfungen | PASS |
+| Exakte HTTP-401/403-Challenges, keine doppelten Header, Header-Spoofing, Reader/Admin, ID-Token-Ablehnung | PASS |
+| Browser-Setup, fremder Admin/Reader, Origin/CSRF, Logout | PASS |
+| Gateway-Ausfall / Containerlog-Secretprüfung | PASS |
+
+Der echte Browsertest deckte zusätzlich zwei Integrationsdetails auf: Keycloak
+benötigt den expliziten Subject-Mapper für Access-Tokens; Chromium sendet mit
+`no-referrer` beim Formular-POST `Origin: null`. Das Profil verwendet daher
+`strict-origin` ohne Pfad-/Query-Weitergabe und behält die strikte Origin-Prüfung.
+Keycloak kann eine unbekannte Ressource erst beim Token-Austausch mit `invalid_target`
+abweisen; der Test prüft diese tatsächliche Grenze, nicht nur die Loginseite.
+Das Setup-Formular wurde mit einem synthetischen, absichtlich verbotenen IMAP-Port
+über den Browser gepostet: CSRF/Origin akzeptiert, Netzwerkregel unverändert ablehnend.
+Erfolgreiche reale Mailbox-Einrichtung bleibt Teil der separaten Live-Abnahme.
+
+Die neuen Auth-Regressionen wurden zuerst gegen die unveränderte Implementierung
+ausgeführt: 17 erwartete Fehler belegten den bisherigen falschen Headervertrag.
+Nach der Korrektur sind alle Tests grün. Es wurden ausschließlich synthetische
+Schlüssel, Identitäten und Passwörter verwendet; keine echten Mailkonten.
+Die zufällig benannten Testcontainer, Volumes und temporären Secret-Dateien wurden
+durch die vorhandenen isolierten Testroutinen entfernt; keine globalen Docker-Prunes.
+
+Die bestehende Python-3.12/3.13-Minimum/Latest-CI bleibt erhalten.
+Für diesen korrigierten Arbeitsstand wurde noch keine Remote-CI ausgeführt;
+lokales PASS ersetzt diesen Nachweis nicht.
+
+## Getrennte externe Abnahme
+
+| Nachweis | Status | Voraussetzung |
+|---|---|---|
+| GitHub-CI für den korrigierten Commit | NOT RUN | Commit und gesondert autorisierter Push, anschließend alle Jobs dieses Commits grün |
+| Echte ChatGPT-Anmeldung und Token-Erneuerung | NOT RUN | Betreiberverbindung, Clients, echte Redirects |
+| Zwei echte Testpostfächer, Suche, UIDVALIDITY, PDF | NOT RUN | separate Testpostfächer, Passwörter nur im Browser |
+| Unveränderte IMAP-Flags vor/nach Live-Zugriff | NOT RUN | Betreiber-Testkonten |
+| Live-Entzug/Deaktivierung/Sessionfristen | NOT RUN | Provider- und ChatGPT-Zugang |
+| Öffentliche Produktionsfreigabe | NO | erfolgreiche Live-Abnahme und bewusste Freigabe der experimentellen Features |
+
+## Manuelle Checkliste
+
+1. Unangemeldet `/mcp`: 401 mit Discovery-Challenge, keine Accountdaten; Cookies ersetzen keine Bearer-Tokens.
+2. ChatGPT mit exakt registriertem Callback verbinden, nach Ablauf erneuerten Access-Token nachweisen.
+3. Reader liest aktive Accounts; Reader kann lokale Kontokonfiguration nicht ändern.
+4. Admin startet Setup; nur derselbe Issuer/Subject darf den Einmallink verwenden.
+5. Zwei Testpostfächer über HTTPS-Formular verbinden; Passwort nie im Chat eingeben.
+6. Pro Konto Header, Body, Attachment-Metadaten und PDF über UIDVALIDITY-Referenz abrufen;
+   Mailbox-Flags vor/nach vergleichen. Keine Mailänderungen zulassen.
+7. Account deaktivieren, Session abmelden, Providerbenutzer sperren; dokumentierte Maximalfristen prüfen.
+8. Keine geheimen Werte in Browser-Redirects, Proxy/Gateway/Backend-Logs oder Toolfehlern.
+
+Implementierung lokal fertig: **ja**. Merge-Freigabe: **Remote-CI ausstehend**.
+Keycloak Resource Indicators bleiben experimentell. Produktionsfreigabe: **nein**;
+separate Live-Abnahme und Betreiberfreigabe bleiben erforderlich.

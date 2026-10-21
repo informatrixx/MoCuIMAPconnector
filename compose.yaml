@@ -1,0 +1,30 @@
+services:
+  mocu-imap:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    volumes:
+      - mocu_data:/data
+    secrets:
+      - mocu_master_key
+    environment:
+      MOCU_MASTER_KEY_FILE: /run/secrets/mocu_master_key
+      DATABASE_PATH: /data/mocu-imap.sqlite3
+      MCP_BIND: 0.0.0.0
+      MCP_PORT: 8765
+      ACCESS_MODE: trusted_proxy
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set exact verified issuer or use the standalone compose.auth.yaml profile}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-[]}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://imap-mcp.example.at}
+      MCP_ALLOWED_HOSTS: '["imap-mcp.example.at", "127.0.0.1", "127.0.0.1:*"]'
+    ports:
+      - "127.0.0.1:8765:8765"
+secrets:
+  mocu_master_key:
+    file: ${MOCU_MASTER_KEY_HOST_FILE:?Set an absolute secret file path outside the checkout}
+volumes:
+  mocu_data:

@@ -24,15 +24,32 @@ def add_account(runtime: Runtime) -> str:
     return runtime.store.finish(token, account_input())
 
 
-def test_crypto_aad_nonce_key_tampering() -> None:
+@pytest.mark.parametrize("nonce", [None, bytes.fromhex("0000000000000000000000f9")],
+                         ids=["random", "ciphertext-starts-with-x"])
+def test_crypto_aad_nonce_key_tampering(nonce: bytes | None, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = CredentialVault(bytes(range(32)))
-    sealed = vault.encrypt("account-a", "synthetic-password-only")
+    if nonce is None:
+        sealed = vault.encrypt("account-a", "synthetic-password-only")
+    else:
+        # Synthetic fixture reproduces the old no-op replacement with certainty.
+        with monkeypatch.context() as patch:
+            patch.setattr("mocu_imap_mcp.credentials.os.urandom", lambda length: nonce)
+            sealed = vault.encrypt("account-a", "synthetic-password-only")
+        assert sealed.ciphertext[0] == ord("x")
     assert vault.decrypt("account-a", sealed) == "synthetic-password-only"
     assert vault.encrypt("account-a", "synthetic-password-only").nonce != sealed.nonce
+    changed_ciphertext = bytes([sealed.ciphertext[0] ^ 1]) + sealed.ciphertext[1:]
+    changed_nonce = bytes([sealed.nonce[0] ^ 1]) + sealed.nonce[1:]
+    changed_tag = sealed.ciphertext[:-1] + bytes([sealed.ciphertext[-1] ^ 1])
+    assert changed_ciphertext != sealed.ciphertext
+    assert changed_nonce != sealed.nonce
+    assert changed_tag != sealed.ciphertext
     for other, account, blob in [
         (vault, "account-b", sealed),
         (CredentialVault(b"x" * 32), "account-a", sealed),
-        (vault, "account-a", dataclasses.replace(sealed, ciphertext=b"x" + sealed.ciphertext[1:])),
+        (vault, "account-a", dataclasses.replace(sealed, ciphertext=changed_ciphertext)),
+        (vault, "account-a", dataclasses.replace(sealed, nonce=changed_nonce)),
+        (vault, "account-a", dataclasses.replace(sealed, ciphertext=changed_tag)),
     ]:
         with pytest.raises(CredentialError):
             other.decrypt(account, blob)

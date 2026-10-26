@@ -44,6 +44,11 @@ bereit; nicht auf implizite Default-Client-Scopes verlassen.
 Der Integrationstest verlangt echte Ressourcenbindung bei Code-Austausch und Refresh;
 Audience-Prüfung darf niemals abgeschaltet werden. Kein CIMD-Feature aktivieren.
 
+`OIDC_BASE_URL` bezeichnet den öffentlich sichtbaren Keycloak-Basispfad ohne
+`/realms/mocu`; er muss zum `OIDC_ISSUER` passen. Beim bisherigen Zwei-Host-Profil
+ist dies beispielsweise `https://auth.example.at`. Auch bestehende env-Dateien
+müssen diese Variable für das Compose-Profil ergänzen.
+
 Ein anderer OIDC-Provider ist über `OIDC_ISSUER` und die Clientdaten konfigurierbar.
 Erforderlich: RS256-JWT-Access-Tokens, feste Audience, eigener Access-Token-Discriminator
 (`ACCESS_TOKEN_TYPE_CLAIM=typ`, `ACCESS_TOKEN_TYPE_VALUE=Bearer` für Keycloak), PKCE,
@@ -218,6 +223,7 @@ python -m ruff check src tests scripts
 python -m mypy src
 python scripts/test_mcp.py
 python scripts/test_auth_e2e.py
+python scripts/test_auth_e2e.py --subpath
 git diff --check
 ```
 
@@ -228,3 +234,68 @@ das selbstsignierte Zertifikat. Keine Produktionsschalter werden dafür gelocker
 Alle temporären Ressourcen sind einem zufälligen Compose-Projekt zugeordnet und
 werden im `finally` entfernt; keine globalen Prunes. Docker-/Build-Fehler bleiben Fehler.
 Remote CI und Live-ChatGPT/IMAP sind separate Nachweise; siehe AUTH_ACCEPTANCE.
+
+## Unterordner auf einem bestehenden nginx-/PHP-Host
+
+Der Connector läuft als Python-/Docker-Dienst neben der PHP-Anwendung. Es werden
+keine Python-Dateien in das PHP-Webroot kopiert. Beispiel für einen gemeinsamen
+Host (die Beispieldomain durch die Betreiber-Domain ersetzen):
+
+| Zweck | Öffentliche URL |
+|---|---|
+| Einstieg zur Anmeldung | `https://admin.example.at/imap/` |
+| MCP-Verbindung | `https://admin.example.at/imap/mcp` |
+| Admin-Anmeldung | `https://admin.example.at/imap/auth/login` |
+| Admin-Callback | `https://admin.example.at/imap/auth/callback` |
+| Provider-Issuer | `https://admin.example.at/imap/oidc/realms/mocu` |
+| Resource-Metadata | `https://admin.example.at/.well-known/oauth-protected-resource/imap/mcp` |
+
+Die Metadata-URL hat den von RFC 9728 vorgesehenen Pfad. Der bestehende Webserver
+leitet deshalb neben `/imap/` auch diese eine genaue `.well-known`-URL weiter.
+Die tatsächliche HTTP-Origin bleibt `https://admin.example.at` ohne Pfad;
+Origin-/CSRF-Prüfungen werden dafür nicht gelockert. Callback, Setup-Links,
+Logout, Issuer und Token-Audience enthalten dagegen den konfigurierten Präfix.
+
+1. Auf dem Debian-Zielserver Checkout und venv installieren wie oben; Docker mit
+   Compose, nginx und das Paket `acl` müssen vorhanden sein.
+2. `deploy/auth/subpath.env.example` außerhalb des Checkouts nach
+   `/etc/mocu-auth/public.env` kopieren und Hostname, exakten ChatGPT-Callback,
+   Subject-IDs, freien Docker-Adressbereich und Pfade eintragen. `AUTH_LISTEN_IP`
+   bleibt `127.0.0.1`, `AUTH_HTTPS_PORT` bleibt `8443`, sofern dort frei.
+3. Secrets, TLS-Zertifikat und Dateirechte wie oben einrichten. Der innere Proxy
+   braucht ein gültiges Zertifikat für dieselbe Domain. Bestehende Zertifikate
+   gezielt einbinden und deren Leserechte für UID 101 setzen; nicht überschreiben.
+4. Secret-freie Proxy-/Realm-Dateien für den gewählten Pfad erzeugen:
+
+   ```bash
+   sudo .venv/bin/python scripts/prepare_auth.py --output /etc/mocu-auth/config \
+     --origin https://admin.example.at/imap \
+     --issuer https://admin.example.at/imap/oidc/realms/mocu \
+     --chatgpt-redirect 'https://EXAKTE-CALLBACK-URI-AUS-DER-VERBINDUNG' \
+     --initial-user operator --initial-subject 'VORHER-ERZEUGTE-FESTE-SUBJECT-ID'
+   ```
+
+5. Preflight und initialen Provider-Import wie oben ausführen und den Stack mit
+   `compose.auth.yaml` starten. Keine Volumes einer bestehenden Installation löschen.
+6. Nur die beiden `location`-Blöcke aus
+   `deploy/auth/nginx-subpath.frontend.conf.example` in den vorhandenen
+   HTTPS-vHost integrieren. Hostname auch bei `Host` und `proxy_ssl_name` ersetzen.
+   `proxy_pass` hat hier bewusst keinen URI-Suffix: der Präfix muss unverändert
+   zum inneren Proxy gelangen. PHP-/Root-Routen und TLS-Einstellungen beibehalten.
+   Vorhandene PHP-Login-Redirects oder ein zusätzlicher vHost-Login dürfen die MCP-
+   und OIDC-Pfade nicht abfangen. Deren Zugang prüft der innere OAuth-Gateway;
+   dessen 401-/403-Antworten müssen unverändert durchgereicht werden.
+7. Erst `sudo nginx -t`, danach bei Erfolg `sudo systemctl reload nginx`.
+   Dann `.venv/bin/python scripts/preflight_auth.py --env-file /etc/mocu-auth/public.env --online`
+   ausführen und den MCP-Endpunkt mit dem exakt registrierten OAuth-Client verbinden.
+
+Ein gemeinsamer Host ist eine gemeinsame Browser-Vertrauensgrenze. Dort sollten
+nur vertrauenswürdige Admin-Anwendungen laufen. Die `__Host-`-Sessioncookies behalten
+aus Sicherheitsgründen `Path=/`, `Secure` und `HttpOnly`; ein Unterordner ist keine
+Isolation zwischen Anwendungen derselben Origin. Der Connector erhält vom inneren
+Proxy weiterhin nur seine CSRF-Cookies, keine Gateway-Sessioncredentials.
+
+Keycloak kennt den öffentlichen Präfix über seine vollständige `KC_HOSTNAME`-URL;
+der Proxy entfernt ihn nur auf dem internen Weg zum Provider. Grundlage:
+[Keycloak: Different context path on reverse proxy](https://www.keycloak.org/server/reverseproxy#_different_context_path_on_reverse_proxy)
+und [MCP Protected Resource Metadata Discovery](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements).

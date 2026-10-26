@@ -12,6 +12,7 @@ from dotenv import dotenv_values
 
 from mocu_imap_mcp.auth_gateway.config import GatewaySettings
 from mocu_imap_mcp.credentials import CredentialVault
+from mocu_imap_mcp.public_urls import metadata_url
 
 
 def check(env_file: Path, online: bool = False) -> None:
@@ -34,6 +35,8 @@ def check(env_file: Path, online: bool = False) -> None:
     settings = GatewaySettings(oidc_issuer=env["OIDC_ISSUER"], mcp_resource=str(env["PUBLIC_BASE_URL"]) + "/mcp",
         admin_oidc_client_secret_file=secrets / "admin_client", allowed_subjects=json.loads(env["ALLOWED_SUBJECTS"]),
         admin_subjects=json.loads(env["ADMIN_SUBJECTS"]))
+    if env.get("OIDC_BASE_URL", "") + "/realms/mocu" != settings.oidc_issuer:
+        raise ValueError("Issuer base URL does not match configured issuer")
     subnet = ipaddress.ip_network(env["AUTH_SUBNET"])
     dynamic = ipaddress.ip_network(env["AUTH_DYNAMIC_RANGE"])
     proxy = ipaddress.ip_address(env["AUTH_PROXY_IP"])
@@ -50,7 +53,7 @@ def check(env_file: Path, online: bool = False) -> None:
         with requests.Session() as client:
             client.trust_env = False
             client.verify = str(env["AUTH_CA_FILE"])
-            response = client.get(settings.origin + "/.well-known/oauth-protected-resource/mcp", timeout=5)
+            response = client.get(metadata_url(settings.mcp_resource), timeout=5)
             response.raise_for_status()
             metadata = response.json()
             if (metadata["resource"] != settings.mcp_resource or

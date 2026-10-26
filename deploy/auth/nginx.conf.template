@@ -15,6 +15,7 @@ http {
     scgi_temp_path /tmp/scgi;
     limit_req_zone $binary_remote_addr zone=mocu:10m rate=10r/s;
     limit_req_zone $binary_remote_addr zone=setup:10m rate=5r/m;
+    limit_req_zone $binary_remote_addr zone=provider:10m rate=30r/s;
     # The connector needs only its CSRF cookie, never the gateway session credential.
     map $http_cookie $mocu_setup_cookie {
         default "";
@@ -41,8 +42,12 @@ http {
         server_name @MCP_HOST@;
         add_header Strict-Transport-Security "max-age=31536000" always;
         limit_req zone=mocu burst=40 nodelay;
-        location = /.well-known/oauth-protected-resource/mcp {
-            proxy_pass http://gateway:8766;
+        location = @BASE_PATH@/ {
+            if ($request_method != GET) { return 405; }
+            return 303 @BASE_PATH@/auth/login;
+        }
+        location = /.well-known/oauth-protected-resource@BASE_PATH@/mcp {
+            proxy_pass http://gateway:8766/.well-known/oauth-protected-resource/mcp;
             proxy_pass_request_headers off;
             proxy_set_header Host @MCP_HOST@;
         }
@@ -62,7 +67,7 @@ http {
             proxy_set_header Content-Length "";
             proxy_set_header Cookie $http_cookie;
         }
-        location = /mcp {
+        location = @BASE_PATH@/mcp {
             auth_request /_verify_bearer;
             # auth_request forwards WWW-Authenticate for 401 itself; do not add it twice.
             # 403 needs the named location below, with an empty value for allowlist denial.
@@ -73,7 +78,7 @@ http {
             auth_request_set $role $upstream_http_x_mocu_role;
             auth_request_set $scopes $upstream_http_x_mocu_scopes;
             auth_request_set $kind $upstream_http_x_mocu_auth_type;
-            proxy_pass http://mocu-imap:8765;
+            proxy_pass http://mocu-imap:8765/mcp;
             proxy_http_version 1.1;
             proxy_buffering off;
             proxy_pass_request_headers off;
@@ -90,7 +95,8 @@ http {
             proxy_set_header X-Mocu-Scopes $scopes;
             proxy_set_header X-Mocu-Auth-Type $kind;
         }
-        location ~ "^/setup/[A-Za-z0-9_-]{43}$" {
+        location ~ "^@BASE_PATH@/setup/[A-Za-z0-9_-]{43}$" {
+            rewrite ^@BASE_PATH@(/setup/.*)$ $1 break;
             limit_req zone=setup burst=20 nodelay;
             client_max_body_size 16k;
             auth_request /_verify_session;
@@ -114,7 +120,7 @@ http {
         }
         location @browser_login {
             if ($request_method != GET) { return 401; }
-            set $setup_return $uri;
+            set $setup_return @BASE_PATH@$uri;
             rewrite ^ /auth/login? break;
             proxy_pass http://gateway:8766;
             proxy_pass_request_body off;
@@ -127,31 +133,16 @@ http {
             add_header WWW-Authenticate $mcp_challenge always;
             return 403;
         }
-        location /auth/ {
-            proxy_pass http://gateway:8766;
+        location @BASE_PATH@/auth/ {
+            proxy_pass http://gateway:8766/auth/;
             proxy_pass_request_headers off;
             proxy_set_header Host @MCP_HOST@;
             proxy_set_header Content-Type $http_content_type;
             proxy_set_header Cookie $http_cookie;
             proxy_set_header Origin $http_origin;
         }
+        @SHARED_PROVIDER_LOCATIONS@
         location / { return 404; }
     }
-    server {
-        listen 443 ssl;
-        server_name @AUTH_HOST@;
-        add_header Strict-Transport-Security "max-age=31536000" always;
-        location / {
-            proxy_pass http://keycloak:8080;
-            proxy_set_header Host @AUTH_HOST@;
-            proxy_set_header X-Forwarded-Host @AUTH_HOST@;
-            proxy_set_header X-Forwarded-Proto https;
-            proxy_set_header X-Forwarded-Port 443;
-            proxy_set_header X-Forwarded-For $remote_addr;
-        }
-        # Provider administration is via an operator's private connection, not public.
-        location /admin/ { return 403; }
-        location /realms/master/ { return 403; }
-        location ~ /clients-registrations/ { return 403; }
-    }
+    @PROVIDER_SERVER@
 }

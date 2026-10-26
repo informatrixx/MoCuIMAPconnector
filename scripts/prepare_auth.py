@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from mocu_imap_mcp.public_urls import validate_base_url
+
 
 def realm(resource: str, redirect: str, origin: str) -> dict[str, object]:
     scopes = [{"name": name, "protocol": "openid-connect", "attributes": {"include.in.token.scope": "true"}}
@@ -48,11 +50,24 @@ def render(output: Path, origin: str, issuer: str, redirect: str,
         if (url.scheme != "https" or not url.hostname or url.username or url.password or url.fragment or
                 not re.fullmatch(r"[a-zA-Z0-9.-]+", url.netloc) or '*' in value):
             raise ValueError("Exact HTTPS URLs without wildcards required")
-    if urlsplit(origin).path or urlsplit(issuer).path != "/realms/mocu":
-        raise ValueError("Reference profile requires an origin and /realms/mocu issuer")
+    origin = validate_base_url(origin)
+    validate_base_url(issuer)
+    if not issuer.endswith("/realms/mocu"):
+        raise ValueError("Reference profile requires a /realms/mocu issuer")
+    base_path = urlsplit(origin).path
+    oidc_path = urlsplit(issuer).path.removesuffix("/realms/mocu")
+    shared_host = urlsplit(origin).netloc == urlsplit(issuer).netloc
+    if shared_host and (not base_path or oidc_path != base_path + "/oidc"):
+        raise ValueError("Shared host requires a separate <base-path>/oidc provider path")
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
     nginx = (root / "deploy/auth/nginx.conf.template").read_text()
-    nginx = nginx.replace("@MCP_HOST@", urlsplit(origin).netloc).replace("@AUTH_HOST@", urlsplit(issuer).netloc)
+    provider = (root / "deploy/auth/provider.locations.template").read_text()
+    provider = provider.replace("@OIDC_PATH@", oidc_path).replace("@AUTH_HOST@", urlsplit(issuer).netloc)
+    provider_server = ("server { listen 443 ssl; server_name " + urlsplit(issuer).netloc + ";\n" +
+                       'add_header Strict-Transport-Security "max-age=31536000" always;\n' + provider + "\n}")
+    nginx = (nginx.replace("@MCP_HOST@", urlsplit(origin).netloc).replace("@BASE_PATH@", base_path)
+             .replace("@SHARED_PROVIDER_LOCATIONS@", provider if shared_host else "")
+             .replace("@PROVIDER_SERVER@", "" if shared_host else provider_server))
     with (output / "nginx.conf").open("x") as file:
         file.write(nginx)
     profile = realm(origin + "/mcp", redirect, origin)

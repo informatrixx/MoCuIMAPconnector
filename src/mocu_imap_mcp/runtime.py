@@ -16,6 +16,7 @@ from .config import Settings
 from .credentials import CredentialVault
 from .imap_client import ImapClient
 from .network import connection_factory
+from .public_urls import validate_base_url
 
 
 class RuntimeSettings(BaseSettings):
@@ -37,13 +38,7 @@ class RuntimeSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime(self) -> RuntimeSettings:
-        from urllib.parse import urlsplit
-
-        url = urlsplit(self.public_base_url)
-        if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise ValueError("PUBLIC_BASE_URL muss eine HTTPS-Origin sein")
-        if url.path not in ("", "/"):
-            raise ValueError("PUBLIC_BASE_URL darf keinen Pfad enthalten")
+        self.public_base_url = validate_base_url(self.public_base_url)
         if self.access_mode == "trusted_proxy" and not self.trusted_proxy_ips:
             raise ValueError("TRUSTED_PROXY_IPS muss explizit gesetzt werden")
         if self.access_mode == "trusted_proxy":

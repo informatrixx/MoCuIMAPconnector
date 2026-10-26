@@ -1,5 +1,33 @@
 # Auth-Abnahmeprotokoll
 
+## Unterordner-Profil vom 2026-10-26
+
+Der Kryptografie-Testfix wurde als `026838ff4ff5e9963691bbc9542372d32eda22ad`
+über [PR #2](https://github.com/informatrixx/MoCuIMAPconnector/pull/2) nach `develop`
+gemergt. Alle sechs Jobs des anschließenden
+[CI-Laufs 40279722938](https://github.com/informatrixx/MoCuIMAPconnector/actions/runs/40279722938)
+zu `d6f1469b93c75a2599a304f48bd7ac1eba074e30` sind **PASS**.
+
+Auf dieser Basis ergänzt das Unterordner-Profil einen konfigurierten HTTPS-Basispfad,
+z. B. `/imap`. Connector und Keycloak können denselben Host verwenden; der Provider
+liegt dann unter `/imap/oidc`. Rückkehrziele, Setup-Links, Logout und OAuth-Callbacks
+behalten den Präfix. Die Metadata-URL folgt RFC 9728, die CSRF-Prüfung verwendet
+weiterhin ausschließlich die tatsächliche HTTP-Origin ohne Pfad. Mehrdeutige
+Pfade und überlappende Provider-Routen werden abgewiesen.
+
+Das Frontend-Beispiel ergänzt zwei Locations im bestehenden nginx-/PHP-vHost;
+das Compose-Profil bleibt an Loopback gebunden. HTTPS zwischen Frontend und
+innerem Proxy wird mit Zertifikatsprüfung verwendet. Die reale Betreiberumgebung
+wurde noch nicht verändert. Einrichtung und Grenzen stehen in
+[AUTH_DEPLOYMENT](AUTH_DEPLOYMENT.md#unterordner-auf-einem-bestehenden-nginx-php-host).
+
+Lokal für diesen Unterordner-Diff am 2026-10-26: **199 Tests**, Ruff, mypy,
+MCP-Smoke sowie vollständiger Keycloak-/nginx-/Chromium-E2E für das bisherige
+Zwei-Host-Profil und das neue gemeinsame `/imap/`-Profil erfolgreich.
+Zusätzlich wurde das Frontend-nginx-Beispiel zusammen mit einer bestehenden
+Root-Location per echtem `nginx -t` geprüft. Keine echten Mailkonten verwendet;
+Testressourcen und temporäre synthetische Secrets wurden bereinigt.
+
 ## Nachtrag 2026-10-26: sporadischen Kryptografie-Test korrigieren
 
 Basis: `develop` nach Merge von PR #1, Commit

@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .accounts import AccountInput
 from .auth_context import Principal, challenge, principal, require_access
 from .multi_tools import register
+from .public_urls import url_origin
 from .runtime import Runtime
 
 _HEADERS = {
@@ -79,7 +80,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
     mcp_app = server.streamable_http_app(
         stateless_http=True, json_response=True, transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=runtime.settings.mcp_allowed_hosts,
-            allowed_origins=[runtime.settings.public_base_url.rstrip("/")],
+            allowed_origins=[url_origin(runtime.settings.public_base_url)],
         ),
     )
 
@@ -121,7 +122,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
             )
             response.set_cookie("__Host-mocu-csrf", csrf, secure=True, httponly=True, samesite="strict", max_age=600)
             return response
-        if request.headers.get("origin") != runtime.settings.public_base_url.rstrip("/"):
+        if request.headers.get("origin") != url_origin(runtime.settings.public_base_url):
             return HTMLResponse("Origin ungueltig", status_code=403, headers=_HEADERS)
         if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
             return HTMLResponse("Formular ungueltig", status_code=415, headers=_HEADERS)

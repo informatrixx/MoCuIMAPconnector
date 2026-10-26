@@ -1,5 +1,53 @@
 # Auth-Abnahmeprotokoll
 
+## Nachtrag 2026-10-26: sporadischen Kryptografie-Test korrigieren
+
+Basis: `develop` nach Merge von PR #1, Commit
+`8c8db2b87a5fe516a68cb29812534c7c11b2f1b6`.
+Die Review-CI zu `49a279ea65fd862ac99f378daf01ca2937fb0ae3` war vollständig grün;
+PR #1 wurde nach `develop` gemergt. Der anschließende
+[Merge-CI-Lauf 39676556882](https://github.com/informatrixx/MoCuIMAPconnector/actions/runs/39676556882)
+war **FAIL**: Docker und Auth-E2E erfolgreich, Python 3.13/latest mit einem
+fehlgeschlagenen Test, zwei weitere Matrixjobs durch fail-fast abgebrochen.
+
+Ursache: Der Manipulationstest ersetzte das erste zufällige Chiffretext-Byte durch
+`x`. War es bereits `x`, blieb der gesamte Chiffretext unverändert und wurde
+korrekt entschlüsselt; der Test erwartete dennoch einen Fehler. Eine feste,
+ausschließlich synthetische Nonce reproduziert diesen Fall zuverlässig und ließ
+den alten Test vor der Korrektur fehlschlagen.
+
+Die Korrektur kippt garantiert ein Bit statt ein möglicherweise identisches Byte
+einzusetzen. Zusätzlich werden Veränderungen von Nonce und Authentifizierungs-Tag
+geprüft; Tests für fremde Account-ID und falschen Schlüssel bleiben erhalten.
+Produktiver Verschlüsselungs- und Authentifizierungscode ist unverändert.
+
+Lokale Nachweise am 2026-10-26 mit Python 3.13.5 für diesen Korrektur-Diff:
+
+| Prüfung | Ergebnis |
+|---|---|
+| pytest | PASS, 184 Tests |
+| Manipulationsprüfung wiederholt | PASS, 1000 zufällige und 1000 feste Regressionfälle |
+| Ruff / mypy / MCP-Smoke / `git diff --check` | PASS |
+
+Die GitHub-CI des Korrektur-PRs und des anschließenden Merge-Commits muss separat
+vollständig grün sein. Die oben genannten lokalen Ergebnisse behaupten keinen
+Remote-CI-Erfolg. Die tatsächlichen Läufe sind unter
+[GitHub Actions](https://github.com/informatrixx/MoCuIMAPconnector/actions/workflows/ci.yml)
+für den jeweiligen Commit nachvollziehbar.
+
+Live-ChatGPT, echte IMAP-Testkonten, Rechnungen/PDFs aus 2025, unveränderte
+Postfach-Flags sowie Live-Entzug und Token-Erneuerung bleiben **NOT RUN**.
+Für die Live-Abnahme werden die Betreiber-Domains, TLS-/OIDC-Konfiguration und
+separate Testpostfächer benötigt. Passwörter ausschließlich im HTTPS-Setup
+eingeben. Der Ablauf steht in der manuellen Checkliste unten und in
+[AUTH_DEPLOYMENT](AUTH_DEPLOYMENT.md). Alle freigeschalteten Reader sehen alle
+aktivierten Konten; Keycloak Resource Indicators bleiben experimentell.
+
+## Historisches Closeout-Protokoll vom 2026-10-21 (vor Commit und Push)
+
+Die folgenden Angaben zu ausstehendem Commit, Push, Merge und Remote-CI beschreiben
+den damaligen Prüfzeitpunkt. Den späteren Merge und CI-Befund dokumentiert der Nachtrag oben.
+
 Review-Baseline: `453335ec6fcb1759c697c661c4b06205dda2b4d3`.
 Geprüfter Arbeitsstand: diese Baseline plus uncommitteter Auth-Review-Closeout-Diff
 (CI-Projektinstallation, Fehlerklassifizierung, Regressionstests und dieses Protokoll).

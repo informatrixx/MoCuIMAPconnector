@@ -5,6 +5,7 @@ Only resources bearing this run's random Compose project name are removed.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime
 import json
@@ -60,6 +61,13 @@ def tls(directory: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--subpath", action="store_true", help="Test shared-host /imap/ deployment")
+    args = parser.parse_args()
+    base_path = "/imap" if args.subpath else ""
+    public_base = "https://imap-mcp.example.at" + base_path
+    oidc_base = public_base + "/oidc" if args.subpath else "https://auth.example.at"
+    issuer = oidc_base + "/realms/mocu"
     def interrupted(signum: int, frame: object) -> None:
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, interrupted)
@@ -74,8 +82,16 @@ def main() -> None:
             (secret_dir / name).write_text("synthetic-" + secrets.token_urlsafe(32) + "\n")
         (secret_dir / "master_key").write_bytes(base64.urlsafe_b64encode(secrets.token_bytes(32)))
         tls(tls_dir)
-        render(config, "https://imap-mcp.example.at", "https://auth.example.at/realms/mocu",
-               "https://imap-mcp.example.at/test-callback")
+        render(config, public_base, issuer, public_base + "/test-callback")
+        if args.subpath:
+            frontend = (ROOT / "deploy/auth/nginx-subpath.frontend.conf.example").read_text()
+            (config / "frontend.conf").write_text(
+                'pid /tmp/nginx.pid; events {} http { access_log off; '
+                'client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; '
+                'fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi; '
+                'server { listen 8443 ssl; '
+                'ssl_certificate /run/tls/cert.pem; ssl_certificate_key /run/tls/key.pem;\n' + frontend +
+                '\nlocation / { return 200 "existing-site"; } } }\n')
         realm_path = config / "realm.json"
         data = json.loads(realm_path.read_text())
         users = ("synthetic-admin", "synthetic-reader", "synthetic-other-admin")
@@ -95,6 +111,7 @@ def main() -> None:
         override = path / "test.yaml"
         override.write_text(json.dumps({"services": {"runner": {
             "build": {"context": str(ROOT), "dockerfile": "deploy/auth/Test.Dockerfile"},
+            "environment": {"MOCU_TEST_BASE_PATH": base_path},
             "networks": ["auth"], "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
             "volumes": [f"{secret_dir / 'test_password'}:/test/password:ro",
                         f"{secret_dir / 'chatgpt_client'}:/test/client:ro",
@@ -103,8 +120,9 @@ def main() -> None:
                "AUTH_TLS_DIR": str(tls_dir), "AUTH_CA_FILE": str(tls_dir / "cert.pem"),
                "AUTH_PROXY_IP": "172.29.187.2", "AUTH_SUBNET": "172.29.187.0/24",
                "AUTH_DYNAMIC_RANGE": "172.29.187.128/25",
-               "AUTH_HOST": "auth.example.at", "MCP_HOST": "imap-mcp.example.at",
-               "OIDC_ISSUER": "https://auth.example.at/realms/mocu", "PUBLIC_BASE_URL": "https://imap-mcp.example.at",
+               "AUTH_HOST": "imap-mcp.example.at" if args.subpath else "auth.example.at",
+               "MCP_HOST": "imap-mcp.example.at", "OIDC_BASE_URL": oidc_base,
+               "OIDC_ISSUER": issuer, "PUBLIC_BASE_URL": public_base,
                "ALLOWED_SUBJECTS": json.dumps(list(subjects.values())),
                "ADMIN_SUBJECTS": json.dumps([subjects["synthetic-admin"], subjects["synthetic-other-admin"]]),
                "AUTH_LISTEN_IP": "127.0.0.1", "AUTH_HTTPS_PORT": "0"}
@@ -112,7 +130,8 @@ def main() -> None:
         try:
             env_file = path / "profile.env"
             keys = ("AUTH_CONFIG_DIR", "AUTH_SECRETS_DIR", "AUTH_TLS_DIR", "AUTH_CA_FILE", "AUTH_PROXY_IP",
-                    "AUTH_SUBNET", "AUTH_DYNAMIC_RANGE", "AUTH_HOST", "MCP_HOST", "OIDC_ISSUER", "PUBLIC_BASE_URL",
+                    "AUTH_SUBNET", "AUTH_DYNAMIC_RANGE", "AUTH_HOST", "MCP_HOST", "OIDC_ISSUER", "OIDC_BASE_URL",
+                    "PUBLIC_BASE_URL",
                     "ALLOWED_SUBJECTS", "ADMIN_SUBJECTS", "AUTH_LISTEN_IP", "AUTH_HTTPS_PORT")
             env_file.write_text("\n".join(f"{key}={env[key]}" for key in keys) + "\n")
             check(env_file)
@@ -122,6 +141,14 @@ def main() -> None:
             print("Auth E2E: builds PASS; starting provider and proxy", flush=True)
             run([*compose, "up", "-d", "proxy"], env=env)
             run([*compose, "exec", "-T", "proxy", "nginx", "-t"], env=env)
+            if args.subpath:
+                run(["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "101:101",
+                    "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--tmpfs", "/tmp:size=8m",
+                    "--mount", f"type=bind,source={config / 'frontend.conf'},target=/etc/nginx/nginx.conf,readonly",
+                    "--mount", f"type=bind,source={tls_dir},target=/run/tls,readonly",
+                    "nginx:stable-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5",
+                    "nginx", "-t", "-e", "stderr"], env=env)
+                print("Auth E2E: existing-site frontend nginx configuration PASS", flush=True)
             run([*compose, "exec", "-T", "gateway", "python", "-c",
                 "import os,pathlib; assert os.getuid()==10001; "
                 "assert not pathlib.Path('/run/secrets/mocu_master_key').exists(); "

@@ -28,7 +28,7 @@ def identity_headers(identity: Principal) -> dict[str, str]:
 def create_gateway(settings: GatewaySettings, provider: Provider | None = None,
                    state: BrowserState | None = None) -> Starlette:
     service = provider or Provider(settings)
-    sessions = state or BrowserState()
+    sessions = state or BrowserState(settings.base_path)
 
     def denied(code: int = 401, *, authenticate: str | None = None) -> Response:
         headers = dict(HEADERS)
@@ -85,8 +85,9 @@ def create_gateway(settings: GatewaySettings, provider: Provider | None = None,
     async def login(request: Request) -> Response:
         try:
             # nginx's internal GET fallback supplies the original path; never a query parameter.
-            target = request.headers.get("x-mocu-return", "/auth/session") if peer_allowed(request) else "/auth/session"
-            item = sessions.begin(safe_return(target))
+            default = settings.base_path + "/auth/session"
+            target = request.headers.get("x-mocu-return", default) if peer_allowed(request) else default
+            item = sessions.begin(safe_return(target, settings.base_path))
             response = RedirectResponse(await run_in_threadpool(service.authorize, item), status_code=303,
                                         headers=HEADERS)
             response.set_cookie(TRANSACTION, item.browser, secure=True, httponly=True, samesite="lax", max_age=180)
@@ -122,7 +123,7 @@ def create_gateway(settings: GatewaySettings, provider: Provider | None = None,
                                 settings.session_absolute_seconds)
             return HTMLResponse('<h1>MoCu Admin</h1><p>Gemeinsame Vertrauensgruppe: '
                 'Reader sehen alle aktiven Konten.</p>'
-                '<form method="post" action="/auth/logout"><input type="hidden" name="csrf" '
+                f'<form method="post" action="{settings.base_path}/auth/logout"><input type="hidden" name="csrf" '
                 f'value="{item.csrf}"><button>Abmelden</button></form>', headers=HEADERS)
         except ValueError:
             return denied()

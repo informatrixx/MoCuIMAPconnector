@@ -14,7 +14,7 @@ services:
       ACCESS_MODE: trusted_proxy
       TRUSTED_PROXY_IPS: '["${AUTH_PROXY_IP:?Set exact proxy IP}"]'
       OIDC_ISSUER: ${OIDC_ISSUER:?Set exact issuer}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set HTTPS origin}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set HTTPS base URL}
       MCP_ALLOWED_HOSTS: '["${MCP_HOST:?Set host}", "127.0.0.1", "127.0.0.1:*"]'
     networks: [auth]
   gateway:
@@ -73,7 +73,7 @@ services:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://provider-db:5432/keycloak
       KC_DB_USERNAME: keycloak
-      KC_HOSTNAME: https://${AUTH_HOST}
+      KC_HOSTNAME: ${OIDC_BASE_URL:?Set issuer base URL without /realms/mocu}
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_PROXY_TRUSTED_ADDRESSES: ${AUTH_PROXY_IP}

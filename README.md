@@ -43,6 +43,9 @@ der Prozessstart verwendet die Multi-Account-Implementierung.
 
 Separater OAuth/OIDC-Gateway und ein Keycloak-Referenzprofil sind implementiert.
 Installation: [AUTH_DEPLOYMENT](docs/AUTH_DEPLOYMENT.md).
+Auch unter einem bestehenden nginx-/PHP-Host möglich, z. B. `/imap/`:
+[Unterordner-Deployment](docs/AUTH_DEPLOYMENT.md#unterordner-auf-einem-bestehenden-nginx-php-host).
+[Debian-Installation mit kopierbaren Befehlen](docs/INSTALL_DEBIAN_SUBPATH.md).
 Nachweise und noch erforderliche Live-Abnahme: [AUTH_ACCEPTANCE](docs/AUTH_ACCEPTANCE.md).
 Der Connector implementiert keinen OAuth-Authorization-Server.
 

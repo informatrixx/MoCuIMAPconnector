@@ -1,6 +1,7 @@
 """Runs only in the isolated E2E runner. No production secrets or targets."""
 from __future__ import annotations
 
+import os
 import ssl
 import sys
 import time
@@ -16,16 +17,19 @@ from authlib.integrations.requests_client import OAuth2Session
 from playwright.sync_api import Browser, sync_playwright
 
 ORIGIN = "https://imap-mcp.example.at"
-ISSUER = "https://auth.example.at/realms/mocu"
-RESOURCE = ORIGIN + "/mcp"
-CALLBACK = ORIGIN + "/test-callback"
+BASE_PATH = os.environ.get("MOCU_TEST_BASE_PATH", "")
+PUBLIC_BASE = ORIGIN + BASE_PATH
+ISSUER = PUBLIC_BASE + "/oidc/realms/mocu" if BASE_PATH else "https://auth.example.at/realms/mocu"
+RESOURCE = PUBLIC_BASE + "/mcp"
+CALLBACK = PUBLIC_BASE + "/test-callback"
+METADATA = ORIGIN + "/.well-known/oauth-protected-resource" + BASE_PATH + "/mcp"
 
 
 def assert_challenge(response: requests.Response, status: int, error: str | None = None,
                      scope: str | None = None) -> None:
     """Check raw header count too: requests' merged header can hide duplicates."""
     assert response.status_code == status
-    expected = f'Bearer resource_metadata="{ORIGIN}/.well-known/oauth-protected-resource/mcp"'
+    expected = f'Bearer resource_metadata="{METADATA}"'
     if error:
         expected += f', error="{error}"'
     if scope:
@@ -49,6 +53,9 @@ def code(browser: Browser, client: OAuth2Session, user: str, resource: str = RES
         state="synthetic-state", code_verifier="v" * 64, resource=resource)
     context = browser.new_context(ignore_https_errors=True)  # ephemeral self-signed browser fixture only
     page = context.new_page()
+    page.on("response", lambda response: print("Auth E2E: browser HTTP failure " + str({
+        "status": response.status, "provider": response.url.startswith(ISSUER)}), flush=True)
+        if response.status >= 400 and urlsplit(response.url).path != urlsplit(CALLBACK).path else None)
     try:
         page.goto(url)
         print("Auth E2E: browser authorization form loaded", flush=True)
@@ -76,7 +83,7 @@ def main() -> None:
     while time.monotonic() < deadline:
         try:
             if (http.get(ISSUER + "/.well-known/openid-configuration", timeout=3).status_code == 200 and
-                http.get(ORIGIN + "/.well-known/oauth-protected-resource/mcp", timeout=3).status_code == 200):
+                http.get(METADATA, timeout=3).status_code == 200):
                 break
         except requests.RequestException:
             pass
@@ -84,8 +91,15 @@ def main() -> None:
     else:
         raise RuntimeError("Auth stack readiness deadline exceeded")
     print("Auth E2E: provider and gateway ready", flush=True)
-    metadata = http.get(ORIGIN + "/.well-known/oauth-protected-resource/mcp", timeout=5).json()
+    metadata = http.get(METADATA, timeout=5).json()
     assert metadata["resource"] == RESOURCE and metadata["authorization_servers"] == [ISSUER]
+    if BASE_PATH:
+        landing = http.get(PUBLIC_BASE + "/", allow_redirects=False, timeout=5)
+        assert landing.status_code == 303
+        assert urlsplit(landing.headers["Location"]).path == BASE_PATH + "/auth/login"
+        assert http.post(ORIGIN + "/mcp", json={}, timeout=5).status_code == 404
+        assert http.get(PUBLIC_BASE + "/oidc/admin/", timeout=5).status_code == 403
+        assert http.get(PUBLIC_BASE + "/oidc/realms/master/", timeout=5).status_code == 403
     unauth = http.post(RESOURCE, json={}, timeout=5)
     assert_challenge(unauth, 401)
     invalid = http.post(RESOURCE, headers={"Authorization": "Bearer synthetic-secret-must-not-leak"},
@@ -96,7 +110,7 @@ def main() -> None:
                      json={}, timeout=5).status_code == 401
     duplicate = HTTPSConnection("imap-mcp.example.at", context=ssl.create_default_context(
         cafile="/test/ca.pem"), timeout=5)
-    duplicate.putrequest("POST", "/mcp")
+    duplicate.putrequest("POST", BASE_PATH + "/mcp")
     duplicate.putheader("Authorization", "Bearer synthetic-one")
     duplicate.putheader("Authorization", "Bearer synthetic-two")
     duplicate.putheader("Content-Length", "0")
@@ -150,7 +164,7 @@ def main() -> None:
             else:
                 result = tool(restricted["access_token"], "begin_account_setup")
                 assert result["isError"] and result["_meta"]["mcp/www_authenticate"] == [
-                    f'Bearer resource_metadata="{ORIGIN}/.well-known/oauth-protected-resource/mcp", '
+                    f'Bearer resource_metadata="{METADATA}", '
                     'error="insufficient_scope", scope="mocu:admin"']
         print("Auth E2E: exact 401/403 challenges, single proxy headers, scope/role distinction PASS", flush=True)
         for resource, verifier in [("https://wrong.example/mcp", "v" * 64), (RESOURCE, "wrong" * 16)]:
@@ -160,6 +174,8 @@ def main() -> None:
                     Path("/test/client").read_text().strip()), data={"grant_type": "authorization_code",
                     "code": fresh_code, "redirect_uri": CALLBACK, "code_verifier": verifier,
                     "resource": resource}, timeout=5)
+                print("Auth E2E: negative token exchange " + str({"status": response.status_code,
+                    "resource_mismatch": resource != RESOURCE}), flush=True)
                 assert response.status_code == 400
         with oauth() as client:
             invalid_code = code(browser, client, "synthetic-admin", resource="https://wrong.example/mcp",
@@ -177,7 +193,8 @@ def main() -> None:
         page.goto(setup)
         page.locator("#username").fill("synthetic-reader")
         page.locator("#password").fill(Path("/test/password").read_text().strip())
-        with page.expect_response(lambda response: urlsplit(response.url).path == "/auth/callback") as rejected:
+        with page.expect_response(
+                lambda response: urlsplit(response.url).path == BASE_PATH + "/auth/callback") as rejected:
             page.locator("#kc-login").click(no_wait_after=True)
         assert rejected.value.status == 400
         assert not any(cookie["name"] == "__Host-mocu-session" for cookie in context.cookies())
@@ -210,14 +227,14 @@ def main() -> None:
                 assert submitted.value.status == 400
                 print("Auth E2E: setup POST passes CSRF/Origin and rejects forbidden IMAP port PASS", flush=True)
                 assert Path("/test/password").read_text().strip() not in submitted.value.text()
-                page.goto(ORIGIN + "/auth/session")
-                with page.expect_response(lambda response: response.url == ORIGIN + "/auth/logout") as logged_out:
+                page.goto(PUBLIC_BASE + "/auth/session")
+                with page.expect_response(lambda response: response.url == PUBLIC_BASE + "/auth/logout") as logged_out:
                     page.locator("button").click(no_wait_after=True)
                 print("Auth E2E: logout contract " + str({"status": logged_out.value.status,
                     "origin_matches": logged_out.value.request.headers.get("origin") == ORIGIN,
                     "origin_null": logged_out.value.request.headers.get("origin") == "null"}), flush=True)
                 assert logged_out.value.status == 204
-                assert context.request.get(ORIGIN + "/auth/session").status == 401
+                assert context.request.get(PUBLIC_BASE + "/auth/session").status == 401
                 expired = context.request.post(setup, data={})
                 assert expired.status == 401 and "location" not in expired.headers
                 assert "www-authenticate" not in expired.headers

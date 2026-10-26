@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ..public_urls import url_origin, validate_base_url
+
 
 class GatewaySettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", hide_input_in_errors=True)
@@ -28,7 +30,15 @@ class GatewaySettings(BaseSettings):
 
     @property
     def origin(self) -> str:
+        return url_origin(self.mcp_resource)
+
+    @property
+    def public_base_url(self) -> str:
         return self.mcp_resource.removesuffix("/mcp")
+
+    @property
+    def base_path(self) -> str:
+        return urlsplit(self.public_base_url).path
 
     @model_validator(mode="after")
     def validate_urls(self) -> GatewaySettings:
@@ -38,7 +48,8 @@ class GatewaySettings(BaseSettings):
             if (url.scheme != "https" or not url.hostname or url.username or url.password or url.query or
                     url.fragment or any(ord(c) < 33 or ord(c) > 126 or c in {'"', '\\'} for c in value)):
                 raise ValueError("Exakte HTTPS-URLs ohne Credentials erforderlich")
-        if urlsplit(self.mcp_resource).path != "/mcp":
+        validate_base_url(self.mcp_resource)
+        if not urlsplit(self.mcp_resource).path.endswith("/mcp") or self.mcp_resource.endswith("/"):
             raise ValueError("MCP_RESOURCE muss den exakten /mcp Endpoint bezeichnen")
         if not set(self.admin_subjects).issubset(self.allowed_subjects):
             raise ValueError("Admins muessen explizit freigeschaltet sein")

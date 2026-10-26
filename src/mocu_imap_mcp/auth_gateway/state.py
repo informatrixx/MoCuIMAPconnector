@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from ..auth_context import Principal
 
 
-def safe_return(value: str) -> str:
-    if value != "/auth/session" and not re.fullmatch(r"/setup/[A-Za-z0-9_-]{43}", value):
+def safe_return(value: str, base_path: str = "") -> str:
+    if value != base_path + "/auth/session" and not re.fullmatch(
+            re.escape(base_path) + r"/setup/[A-Za-z0-9_-]{43}", value):
         raise ValueError("Ungueltiges Rueckkehrziel")
     return value
 
@@ -36,13 +37,14 @@ class Session:
 
 
 class BrowserState:
-    def __init__(self) -> None:
+    def __init__(self, base_path: str = "") -> None:
+        self.base_path = base_path
         self.lock = threading.Lock()
         self.transactions: dict[str, Transaction] = {}
         self.sessions: dict[str, Session] = {}
 
     def begin(self, return_to: str) -> Transaction:
-        safe_return(return_to)
+        safe_return(return_to, self.base_path)
         with self.lock:
             now = time.monotonic()
             self.transactions = {k: v for k, v in self.transactions.items() if v.expires > now}

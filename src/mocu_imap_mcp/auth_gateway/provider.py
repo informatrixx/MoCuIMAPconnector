@@ -135,7 +135,7 @@ class Provider:
             raise ValueError("OIDC-Client-Secret fehlt")
         client = BoundedOAuthSession(self.settings.admin_oidc_client_id, secret,
             token_endpoint_auth_method="client_secret_basic", scope="openid",
-            redirect_uri=self.settings.origin + "/auth/callback", code_challenge_method="S256")
+            redirect_uri=self.settings.public_base_url + "/auth/callback", code_challenge_method="S256")
         client.trust_env = False
         client.verify = str(self.settings.oidc_ca_file) if self.settings.oidc_ca_file else True
         return client

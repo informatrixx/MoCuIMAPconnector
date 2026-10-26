@@ -69,3 +69,5 @@ jobs:
           python -c "import mocu_imap_mcp"
       - name: Real provider and browser integration
         run: python scripts/test_auth_e2e.py
+      - name: Shared-host subpath provider and browser integration
+        run: python scripts/test_auth_e2e.py --subpath

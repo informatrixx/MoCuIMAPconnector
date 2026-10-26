@@ -5,6 +5,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal
 
+from .public_urls import metadata_url
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -48,8 +50,7 @@ def challenge(resource: str, *, error: Literal["invalid_token", "insufficient_sc
             scope not in {None, "mocu:read", "mocu:admin"} or
             (scope is not None and error != "insufficient_scope")):
         raise ValueError("Ungueltige OAuth-Challenge-Konfiguration")
-    origin = resource.removesuffix("/mcp")
-    value = f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/mcp"'
+    value = f'Bearer resource_metadata="{metadata_url(resource)}"'
     if error:
         value += f', error="{error}"'
     if scope:
